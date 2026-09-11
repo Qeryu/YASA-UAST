@@ -1,100 +1,197 @@
 package main
 
 import (
-	"go/token"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
-// Batch B — error-path tests written against the P2 target behavior:
-// parser entry points return errors / skip the bad input, and never panic or
-// os.Exit. Every case is skipped in P1 and turns green after the M1 error-model
-// refactor (docs/uastgo-wasm-plan.md §3.4). The assertion bodies are kept so the
-// tests become real once the signatures allow an error to be observed.
+// Batch B — error-path target contracts for the P2 error-model refactor.
+//
+// These tests are skipped in P1, but the assertion bodies are *falsifiable*:
+// removing a t.Skip makes the test fail against the current implementation,
+// because every assertion describes the P2 target (graceful failure, partial
+// success, structured reporting) rather than today's panic/os.Exit/silent-empty
+// behavior. They drive a freshly built CLI binary in a subprocess so the raw
+// process semantics (exit code, stderr) can be observed; once P2 changes the
+// function signatures these can be rewritten as in-process assertions.
+//
+// Not covered here because the symbol lives in package uast (and cannot be
+// reached from package main):
+//   - GetResult before Build returning an error instead of panicking.
+// That case is covered by uast/repro_test.go. The os.Exit dispatch path for an
+// unregistered ast node is also owned by uast/repro_test.go.
 
-// TestBadSyntaxFileReturnsError: a syntactically invalid file must not crash
-// the process (today parseSingleFile panics via parser.ParseFile).
-func TestBadSyntaxFileReturnsError(t *testing.T) {
-	t.Skip("P2: error-model refactor")
+var (
+	cliOnce sync.Once
+	cliPath string
+	cliErr  error
+)
+
+// buildCLI builds the current CLI once per test binary and returns its path.
+func buildCLI(t *testing.T) string {
+	t.Helper()
+	cliOnce.Do(func() {
+		goBin, err := exec.LookPath("go")
+		if err != nil {
+			cliErr = fmt.Errorf("go not found in PATH: %w", err)
+			return
+		}
+		tmp, err := os.MkdirTemp("", "uast4go-cli-*")
+		if err != nil {
+			cliErr = err
+			return
+		}
+		cliPath = filepath.Join(tmp, "uast4go")
+		cmd := exec.Command(goBin, "build", "-buildvcs=false", "-o", cliPath, ".")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			cliErr = fmt.Errorf("go build failed: %v\n%s", err, out)
+		}
+	})
+	if cliErr != nil {
+		t.Fatalf("cannot build CLI under test: %v", cliErr)
+	}
+	return cliPath
+}
+
+type cliResult struct {
+	stdout   string
+	stderr   string
+	exitCode int
+}
+
+func runCLI(t *testing.T, args ...string) cliResult {
+	t.Helper()
+	cmd := exec.Command(buildCLI(t), args...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run CLI: %v", err)
+		}
+		code = ee.ExitCode()
+	}
+	return cliResult{stdout: stdout.String(), stderr: stderr.String(), exitCode: code}
+}
+
+func mustReadFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// TestBadSyntaxSingleFile: a syntactically invalid file must fail gracefully:
+// non-zero exit, no panic, and stderr must identify the offending file.
+// Current behavior: panic (exit 2, "panic:" in stderr) => red when unskipped.
+func TestBadSyntaxSingleFile(t *testing.T) {
+	t.Skip("P2: error-model refactor — 去掉本行后本测试应失败（当前 panic, exit 2）")
 
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad.go")
 	mustWriteFile(t, bad, "package p\n\nfunc broken( {\n")
 	out := filepath.Join(dir, "out.json")
 
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("parseSingleFile panicked on bad syntax: %v", r)
-		}
-	}()
-	parseSingleFile(bad, out)
-	// Target: parseSingleFile returns a structured error (signature change in P2).
+	res := runCLI(t, "-single", "-rootDir="+bad, "-output="+out)
+	if res.exitCode == 0 {
+		t.Fatalf("target: bad syntax must fail gracefully with non-zero exit; got 0\nstderr:\n%s", res.stderr)
+	}
+	combined := res.stderr + res.stdout
+	if strings.Contains(combined, "panic:") {
+		t.Fatalf("target: bad input must not panic; got:\n%s", combined)
+	}
+	if !strings.Contains(combined, "bad.go") {
+		t.Fatalf("target: error must mention the offending file bad.go; got:\n%s", combined)
+	}
 }
 
-// TestEmptyDirReturnsError: a directory without any .go file is a request-level
-// failure and should surface an error, not an empty output.
-func TestEmptyDirReturnsError(t *testing.T) {
-	t.Skip("P2: error-model refactor")
+// TestProjectPartialFailure: D11 semantics — one bad file in a project must not
+// discard the good files; the good ones still appear and the failure is recorded.
+// Current behavior: parser.ParseDir errors and the whole package is dropped
+// (empty output) => red when unskipped.
+func TestProjectPartialFailure(t *testing.T) {
+	t.Skip("P2/D11: error-model refactor — 去掉本行后本测试应失败（当前 ParseDir 失败会丢弃整个包）")
 
 	dir := t.TempDir()
-	if _, _, err := parsePackage(dir, token.NewFileSet()); err == nil {
-		t.Fatalf("expected error for empty dir %s, got nil", dir)
+	mustWriteFile(t, filepath.Join(dir, "go.mod"), "module fixture\n\ngo 1.22\n")
+	mustWriteFile(t, filepath.Join(dir, "good1.go"), "package fixture\n\nfunc Good1() int { return 1 }\n")
+	mustWriteFile(t, filepath.Join(dir, "good2.go"), "package fixture\n\nfunc Good2() int { return 2 }\n")
+	mustWriteFile(t, filepath.Join(dir, "bad.go"), "package fixture\n\nfunc broken( {\n")
+	out := filepath.Join(dir, "out.json")
+
+	res := runCLI(t, "-rootDir="+dir, "-output="+out)
+	raw := mustReadFile(t, out)
+	if !strings.Contains(raw, "good1.go") || !strings.Contains(raw, "good2.go") {
+		t.Fatalf("D11 target: good files must still be emitted; got output:\n%.600s", raw)
+	}
+	if strings.Contains(res.stderr, "panic:") {
+		t.Fatalf("D11 target: must not panic; stderr:\n%s", res.stderr)
+	}
+	// The exact reporting shape is P2's choice: stderr, or an error entry in the
+	// output. Only require that it is surfaced somewhere.
+	if strings.TrimSpace(res.stderr) == "" && !strings.Contains(raw, "bad.go") {
+		t.Fatal("D11 target: the failed file must be recorded (stderr or output); stderr is empty and output does not mention bad.go")
 	}
 }
 
-// TestNoGoModIsReported: findGoMod failure currently falls back to
-// "__unknown_module__"; the request should be rejected explicitly instead.
-func TestNoGoModIsReported(t *testing.T) {
-	t.Skip("P2: error-model refactor")
+// TestRootDirMissing: a missing rootDir is a request-level failure and must
+// return a non-zero status, not silently write an empty result.
+// Current behavior: exit 0 => red when unskipped.
+func TestRootDirMissing(t *testing.T) {
+	t.Skip("P2: error-model refactor — 去掉本行后本测试应失败（当前 exit 0 且写空结果）")
 
 	dir := t.TempDir()
-	mustWriteFile(t, filepath.Join(dir, "a.go"), "package p\n")
-	paths, err := findAllGoMod(dir)
-	if err == nil {
-		t.Fatalf("expected error for directory without go.mod, got paths=%v", paths)
+	missing := filepath.Join(dir, "does-not-exist")
+	out := filepath.Join(dir, "out.json")
+
+	res := runCLI(t, "-rootDir="+missing, "-output="+out)
+	if res.exitCode == 0 {
+		t.Fatalf("request-level failure (missing rootDir) must return non-zero; got 0\nstderr:\n%s", res.stderr)
+	}
+	if !strings.Contains(res.stderr+res.stdout, "does-not-exist") {
+		t.Fatalf("error should identify the missing rootDir; got:\n%s", res.stderr+res.stdout)
 	}
 }
 
-// TestMultipleGoModDetected: several go.mod files currently pick goModPaths[0];
-// after P2 the selection must be deterministic or reported.
-func TestMultipleGoModDetected(t *testing.T) {
-	t.Skip("P2: error-model refactor")
+// TestNoGoFilesDir: a directory with no .go files is a request-level failure.
+// Current behavior: exit 0 with an empty result => red when unskipped.
+func TestNoGoFilesDir(t *testing.T) {
+	t.Skip("P2: error-model refactor — 去掉本行后本测试应失败（当前 exit 0 且写空结果）")
 
 	dir := t.TempDir()
-	mustWriteFile(t, filepath.Join(dir, "go.mod"), "module root\n")
-	sub := filepath.Join(dir, "sub")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	mustWriteFile(t, filepath.Join(sub, "go.mod"), "module sub\n")
+	out := filepath.Join(dir, "out.json")
 
-	paths, err := findAllGoMod(dir)
-	if err != nil {
-		t.Fatalf("findAllGoMod: %v", err)
-	}
-	if len(paths) != 2 {
-		t.Fatalf("expected 2 go.mod paths, got %d: %v", len(paths), paths)
+	res := runCLI(t, "-rootDir="+dir, "-output="+out)
+	if res.exitCode == 0 {
+		t.Fatalf("request-level failure (no .go files) must return non-zero; got 0\nstderr:\n%s", res.stderr)
 	}
 }
 
-// TestVendorDirSkipped: vendor/ must be skipped rather than parsed.
-func TestVendorDirSkipped(t *testing.T) {
-	t.Skip("P2: error-model refactor")
+// TestNoGoModReported: a project without go.mod must not be silently accepted.
+// The assertion deliberately does not prescribe P2's exact shape (warning vs
+// error exit) — only that the condition is surfaced.
+// Current behavior: exit 0, empty stderr, "__unknown_module__" in output =>
+// red when unskipped.
+func TestNoGoModReported(t *testing.T) {
+	t.Skip("P2: error-model refactor — 去掉本行后本测试应失败（当前静默 __unknown_module__，无上报）")
 
-	dir := filepath.Join(t.TempDir(), "vendor")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := findAllGoMod(dir); err == nil {
-		t.Fatal("expected vendor dir to be skipped/reported, got nil error")
-	}
-}
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "a.go"), "package p\n\nfunc Ok() {}\n")
+	out := filepath.Join(dir, "out.json")
 
-// TestUnknownNodeDoesNotExit: builder.visit currently calls os.Exit(-1) for a
-// concrete ast node without a Visit method. The dispatch lives in package uast,
-// so the real P2 assertion belongs in uast/ and must check that an unregistered
-// node yields an error / Noop instead of terminating the process.
-func TestUnknownNodeDoesNotExit(t *testing.T) {
-	t.Skip("P2: error-model refactor")
+	res := runCLI(t, "-rootDir="+dir, "-output="+out)
+	if res.exitCode == 0 && strings.TrimSpace(res.stderr) == "" {
+		t.Fatal("missing go.mod must be reported (non-zero exit or stderr); got exit 0 and empty stderr")
+	}
 }
