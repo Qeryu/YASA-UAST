@@ -1,2 +1,6 @@
 uast4go
 .idea
+node_modules/
+dist/
+dist-wasm/
+package-lock.json

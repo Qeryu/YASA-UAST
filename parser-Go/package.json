@@ -1,0 +1,33 @@
+{
+  "name": "@ant-yasa/uast-parser-go",
+  "version": "0.0.0",
+  "description": "Go UAST parser for YASA (resident wasm, in-process, no Go toolchain required)",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "files": [
+    "dist/",
+    "dist-wasm/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "test": "npm run build && node --test tests/*.test.js",
+    "prepack": "npm run build && npm run build:wasm"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/antgroup/YASA-UAST.git",
+    "directory": "parser-Go"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0"
+  }
+}

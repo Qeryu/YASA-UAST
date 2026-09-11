@@ -5,8 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
+
+var tmpNRe = regexp.MustCompile(`tmp[0-9]+`)
+
+func normalizeTmpN(s string) string {
+	return tmpNRe.ReplaceAllString(s, "tmpX")
+}
 
 // TestParseSourceMatchesSingleCLI is the P3 prerequisite contract: the in-memory
 // core parseSource(name, src) must produce byte-identical JSON to the `-single`
@@ -62,6 +69,53 @@ func TestParseSourceMatchesSingleCLI(t *testing.T) {
 					rel, len(cliBytes), cliBytes, len(memBytes), memBytes)
 			}
 		})
+	}
+}
+
+// TestParseSourcesMatchesProjectCLI is the in-memory project contract: for a
+// single-package fixture, ParseSources(files) must match the CLI -rootDir output
+// after tmpN normalization (cross-file order inside a package is map-ordered).
+func TestParseSourcesMatchesProjectCLI(t *testing.T) {
+	const pgDir = ".."
+	dir := t.TempDir()
+
+	goMod := "module fixture\n\ngo 1.22\n"
+	aGo := "package fixture\n\ntype Point struct {\n\tX int\n\tY int\n}\n\nfunc A() Point { return Point{X: 1, Y: 2} }\n"
+	bGo := "package fixture\n\nfunc B(s string) string { return s + \"!\" }\n"
+	for name, content := range map[string]string{"go.mod": goMod, "a.go": aGo, "b.go": bGo} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cli := buildContractCLI(t, pgDir)
+	out := filepath.Join(dir, "cli.json")
+	cmd := exec.Command(cli, "-rootDir="+dir, "-output="+out)
+	cmd.Dir = pgDir
+	if combined, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("CLI -rootDir failed: %v\n%s", err, combined)
+	}
+	cliBytes, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read CLI output: %v", err)
+	}
+
+	memBytes, errs, perr := ParseSources([]SourceFile{
+		{Name: filepath.Join(dir, "go.mod"), Content: []byte(goMod)},
+		{Name: filepath.Join(dir, "a.go"), Content: []byte(aGo)},
+		{Name: filepath.Join(dir, "b.go"), Content: []byte(bGo)},
+	})
+	if perr != nil {
+		t.Fatalf("ParseSources request error: %v", perr)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("ParseSources errs = %+v, want none", errs)
+	}
+
+	cliNorm := normalizeTmpN(string(cliBytes))
+	memNorm := normalizeTmpN(string(memBytes))
+	if cliNorm != memNorm {
+		t.Fatalf("ParseSources differs from CLI (-rootDir) for the fixture\nCLI:\n%s\nmem:\n%s", cliNorm, memNorm)
 	}
 }
 

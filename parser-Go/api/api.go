@@ -26,6 +26,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"uast4go/uast"
@@ -115,6 +116,12 @@ func parseSource(name string, src []byte) (jsonBytes []byte, errs []ParseError, 
 	return b, buildErrs, nil
 }
 
+// ParseSource is the exported in-memory single-file entry point used by the
+// wasm/npm resident parser (P3). name is used verbatim as loc.sourcefile.
+func ParseSource(name string, src []byte) (jsonBytes []byte, errs []ParseError, err error) {
+	return parseSource(name, src)
+}
+
 // ParseSingleFile reads path and delegates to parseSource. The read is the only
 // filesystem access; a read failure is reported as a file-level
 // error/read_error (not a request-level error), matching the single-file
@@ -178,6 +185,97 @@ func ParseProject(rootDir string) (jsonBytes []byte, errs []ParseError, err erro
 	// 默认取找到的第一个 go.mod
 	firstGoModPath := ""
 	if goModPaths != nil {
+		firstGoModPath = goModPaths[0]
+	}
+	packageInfo, buildErrs, berr := buildPackage(moduleName, packages, fset)
+	errs = append(errs, buildErrs...)
+	if berr != nil {
+		return nil, errs, berr
+	}
+
+	out := &Output{
+		PackageInfo: packageInfo,
+		ModuleName:  moduleName,
+		GoModPath:   firstGoModPath,
+		NumOfGoMod:  len(goModPaths),
+	}
+	b, eerr := encodeOutput(out)
+	if eerr != nil {
+		return nil, errs, eerr
+	}
+	return b, errs, nil
+}
+
+// SourceFile is an in-memory source file for ParseSources.
+type SourceFile struct {
+	Name    string
+	Content []byte
+}
+
+// ParseSources is the exported in-memory project-mode entry point (P3). It
+// mirrors the CLI -rootDir behavior for the same logical tree:
+//   - the virtual root is the common ancestor directory of the file names;
+//   - package paths are "/"+relative-dir (matching preparePackage);
+//   - the module name comes from the shallowest provided go.mod;
+//   - a missing go.mod is a warning/no_gomod and keeps __unknown_module__.
+//
+// A bad file is a file-level error/parse_error and does not discard the good
+// files. Output is identical to the CLI for equivalent input after tmpN
+// normalization (cross-file order inside a package follows Go map iteration).
+func ParseSources(files []SourceFile) (jsonBytes []byte, errs []ParseError, err error) {
+	defer recoverBoundary("ParseSources", "<memory>", &jsonBytes, &errs, &err)
+
+	if len(files) == 0 {
+		return nil, nil, fmt.Errorf("no source files provided")
+	}
+	root := commonRoot(files)
+	fset := token.NewFileSet()
+
+	var goModPaths []string
+	goModContent := make(map[string][]byte)
+	for _, f := range files {
+		if filepath.Base(f.Name) == "go.mod" {
+			goModPaths = append(goModPaths, f.Name)
+			goModContent[f.Name] = f.Content
+		}
+	}
+	sort.Slice(goModPaths, func(i, j int) bool {
+		di, dj := pathDepth(goModPaths[i]), pathDepth(goModPaths[j])
+		if di != dj {
+			return di < dj
+		}
+		return goModPaths[i] < goModPaths[j]
+	})
+
+	moduleName := "__unknown_module__"
+	if len(goModPaths) == 0 {
+		errs = append(errs, ParseError{
+			File:     root,
+			Message:  "not found go.mod",
+			Severity: SeverityWarning,
+			Kind:     KindNoGoMod,
+		})
+	} else {
+		name, rerr := moduleNameFromContent(goModContent[goModPaths[0]], goModPaths[0])
+		if rerr != nil {
+			errs = append(errs, ParseError{
+				File:     goModPaths[0],
+				Message:  rerr.Error(),
+				Severity: SeverityWarning,
+				Kind:     KindNoGoMod,
+			})
+		}
+		moduleName = name
+	}
+
+	packages, pkgErrs := preparePackagesFromSources(root, files, fset)
+	errs = append(errs, pkgErrs...)
+	if len(packages) == 0 {
+		return nil, errs, fmt.Errorf("no packages found under %s", root)
+	}
+
+	firstGoModPath := ""
+	if len(goModPaths) > 0 {
 		firstGoModPath = goModPaths[0]
 	}
 	packageInfo, buildErrs, berr := buildPackage(moduleName, packages, fset)
@@ -349,8 +447,13 @@ func readModuleName(modFilePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	lines := strings.Split(string(content), "\n")
-	for _, line := range lines {
+	return moduleNameFromContent(content, modFilePath)
+}
+
+// moduleNameFromContent is the filesystem-free half of readModuleName, used by
+// the in-memory ParseSources path.
+func moduleNameFromContent(content []byte, source string) (string, error) {
+	for _, line := range strings.Split(string(content), "\n") {
 		if strings.HasPrefix(line, "module") {
 			fields := strings.Fields(line)
 			if len(fields) == 2 {
@@ -358,7 +461,115 @@ func readModuleName(modFilePath string) (string, error) {
 			}
 		}
 	}
-	return "", fmt.Errorf("module directive not found in %s", modFilePath)
+	return "", fmt.Errorf("module directive not found in %s", source)
+}
+
+// pathDepth counts path separators, used to pick the shallowest go.mod.
+func pathDepth(p string) int {
+	return strings.Count(filepath.ToSlash(filepath.Clean(p)), "/")
+}
+
+// commonRoot returns the common ancestor directory of the file names, which
+// plays the role of the CLI's -rootDir.
+func commonRoot(files []SourceFile) string {
+	root := filepath.Dir(files[0].Name)
+	for _, f := range files[1:] {
+		root = commonDir(root, filepath.Dir(f.Name))
+	}
+	return root
+}
+
+func commonDir(a, b string) string {
+	if a == b {
+		return a
+	}
+	if rel, err := filepath.Rel(a, b); err == nil && !isParentRef(rel) {
+		return a
+	}
+	if rel, err := filepath.Rel(b, a); err == nil && !isParentRef(rel) {
+		return b
+	}
+	for {
+		parent := filepath.Dir(a)
+		if parent == a {
+			return parent
+		}
+		a = parent
+		if rel, err := filepath.Rel(a, b); err == nil && !isParentRef(rel) {
+			return a
+		}
+	}
+}
+
+func isParentRef(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// preparePackagesFromSources mirrors preparePackage, but over in-memory files:
+// group by directory, parse each .go file individually (a bad file is recorded,
+// not fatal), then pick one package name per directory via map iteration (O1
+// preserved). Vendor and dot directories are skipped like the CLI does.
+func preparePackagesFromSources(root string, files []SourceFile, fset *token.FileSet) (map[string]*ast.Package, []ParseError) {
+	packages := make(map[string]*ast.Package)
+	var errs []ParseError
+
+	byDir := make(map[string][]SourceFile)
+	for _, f := range files {
+		dir := filepath.Dir(f.Name)
+		if strings.Contains(filepath.ToSlash(dir), "/vendor") {
+			continue
+		}
+		if base := filepath.Base(dir); strings.HasPrefix(base, ".") && base != "." && base != ".." {
+			continue
+		}
+		byDir[dir] = append(byDir[dir], f)
+	}
+
+	for dir, dirFiles := range byDir {
+		hasGo := false
+		for _, f := range dirFiles {
+			if strings.HasSuffix(f.Name, ".go") {
+				hasGo = true
+				break
+			}
+		}
+		if !hasGo {
+			continue
+		}
+
+		pkgs := make(map[string]map[string]*ast.File)
+		for _, f := range dirFiles {
+			if !strings.HasSuffix(f.Name, ".go") {
+				continue
+			}
+			file, perr := parser.ParseFile(fset, f.Name, f.Content, 0)
+			if perr != nil {
+				errs = append(errs, ParseError{
+					File:     f.Name,
+					Message:  perr.Error(),
+					Severity: SeverityError,
+					Kind:     KindParseError,
+				})
+				continue
+			}
+			name := file.Name.Name
+			if pkgs[name] == nil {
+				pkgs[name] = make(map[string]*ast.File)
+			}
+			pkgs[name][f.Name] = file
+		}
+
+		for name, fileMap := range pkgs {
+			rel, _ := filepath.Rel(root, dir)
+			packagePath := filepath.Join("/", rel)
+			packages[packagePath] = &ast.Package{
+				Name:  name,
+				Files: fileMap,
+			}
+			break
+		}
+	}
+	return packages, errs
 }
 
 // containsGoFiles reports whether dir directly contains a .go file.
