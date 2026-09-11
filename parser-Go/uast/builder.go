@@ -91,7 +91,7 @@ func (u *Builder) preprocessTypeDecl() {
 						}
 						cDef, ok := cd.(*ClassDefinition)
 						if !ok {
-							u.recordError(fmt.Sprintf("type declaration %T is not a ClassDefinition", cd))
+							u.recordError(SeverityWarning, KindUnsupportedNode, fmt.Sprintf("type declaration %T is not a ClassDefinition", cd))
 							continue
 						}
 						defId := cDef.Id.Name
@@ -149,7 +149,7 @@ func (u *Builder) build() {
 			default:
 				// ast.File.Decls is only GenDecl/FuncDecl; keep going instead of
 				// terminating the process if an unexpected declaration appears.
-				u.recordError(fmt.Sprintf("unsupported declaration %T", decl))
+				u.recordError(SeverityWarning, KindUnsupportedNode, fmt.Sprintf("unsupported declaration %T", decl))
 			}
 		}
 		u.packPos(&compileUnit, file)
@@ -209,8 +209,8 @@ func (u *Builder) visit(node ast.Node) UNode {
 	t := reflect.TypeOf(node)
 	funcName := "Visit" + getLastPartAfterDot(t.String())
 	if funcName == "Visit" {
-		// 无对应 Visit 方法：记录文件级错误并降级为 Noop，继续构建。
-		u.recordError(fmt.Sprintf("node type %v not found", node))
+		// 无对应 Visit 方法：记录文件级 warning 并降级为 Noop，继续构建。
+		u.recordError(SeverityWarning, KindUnsupportedNode, fmt.Sprintf("node type %v not found", node))
 		return &Noop{}
 	}
 
@@ -220,8 +220,8 @@ func (u *Builder) visit(node ast.Node) UNode {
 	// 通过反射查找实例的方法
 	methodVal := builderVal.MethodByName(funcName)
 	if !methodVal.IsValid() {
-		// 无对应 Visit 方法：记录文件级错误并降级为 Noop，继续构建。
-		u.recordError(fmt.Sprintf("Method %s not found", funcName))
+		// 无对应 Visit 方法：记录文件级 warning 并降级为 Noop，继续构建。
+		u.recordError(SeverityWarning, KindUnsupportedNode, fmt.Sprintf("Method %s not found", funcName))
 		return &Noop{}
 	}
 

@@ -17,10 +17,11 @@ import (
 // and always yields a non-empty method suffix. Only the "method not found"
 // branch (:199) is reachable, and that is what the first test exercises.
 
-// TestVisitUnknownNodeRecordsError verifies that dispatching a concrete ast node
-// without a Visit* method no longer exits the process: it records a file-level
-// error and degrades to *Noop.
-func TestVisitUnknownNodeRecordsError(t *testing.T) {
+// TestVisitUnknownNodeRecordsWarning verifies that dispatching a concrete ast
+// node without a Visit* method no longer exits the process: it records a
+// file-level warning (warning/unsupported_node, which does not block output)
+// and degrades to *Noop.
+func TestVisitUnknownNodeRecordsWarning(t *testing.T) {
 	b := NewUASTBuilder("m", map[string]*ast.Package{}, token.NewFileSet())
 	b.currentFile = "unknown.go"
 
@@ -35,6 +36,12 @@ func TestVisitUnknownNodeRecordsError(t *testing.T) {
 	}
 	if errs[0].File != "unknown.go" {
 		t.Fatalf("error file = %q, want unknown.go", errs[0].File)
+	}
+	if errs[0].Severity != SeverityWarning {
+		t.Fatalf("severity = %q, want %q", errs[0].Severity, SeverityWarning)
+	}
+	if errs[0].Kind != KindUnsupportedNode {
+		t.Fatalf("kind = %q, want %q", errs[0].Kind, KindUnsupportedNode)
 	}
 	if errs[0].Message == "" {
 		t.Fatal("error message should not be empty")

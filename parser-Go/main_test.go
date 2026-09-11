@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"uast4go/api"
 )
 
 // Batch B — error-path contracts (now active, no longer skipped).
@@ -109,6 +111,10 @@ func TestBadSyntaxSingleFile(t *testing.T) {
 	if !strings.Contains(combined, "bad.go") {
 		t.Fatalf("target: error must mention the offending file bad.go; got:\n%s", combined)
 	}
+	// S1: parse failure must not write a product.
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("target: parse failure must not write output; stat err = %v", err)
+	}
 }
 
 // TestProjectPartialFailure: D11 semantics — one bad file in a project must not
@@ -174,5 +180,55 @@ func TestNoGoModReported(t *testing.T) {
 	res := runCLI(t, "-rootDir="+dir, "-output="+out)
 	if res.exitCode == 0 && strings.TrimSpace(res.stderr) == "" {
 		t.Fatal("missing go.mod must be reported (non-zero exit or stderr); got exit 0 and empty stderr")
+	}
+}
+
+// S1: single-file semantics are unified through severity classification.
+// Warning-only entries (builder-level degradation, e.g. an unsupported node
+// turned into Noop) must still write the product and exit 0 — consistent with
+// project mode; error-severity entries (parse/read failure) exit 1 with no
+// product. runSingleFileWith's parse seam makes both paths testable without a
+// synthetic Go source that triggers builder degradation.
+
+func TestRunSingleFileWarningOnlyWritesProduct(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "out.json")
+	payload := []byte("{\"ok\":true}\n")
+	parse := func(string) ([]byte, []api.ParseError, error) {
+		return payload, []api.ParseError{{
+			File:     "x.go",
+			Message:  "unsupported node",
+			Severity: api.SeverityWarning,
+			Kind:     api.KindUnsupportedNode,
+		}}, nil
+	}
+
+	if code := runSingleFileWith(parse, "x.go", out); code != 0 {
+		t.Fatalf("warning-only exit = %d, want 0", code)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("warning-only must write the product: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("product = %q, want %q", got, payload)
+	}
+}
+
+func TestRunSingleFileErrorSeverityWritesNothing(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "out.json")
+	parse := func(string) ([]byte, []api.ParseError, error) {
+		return nil, []api.ParseError{{
+			File:     "bad.go",
+			Message:  "syntax error",
+			Severity: api.SeverityError,
+			Kind:     api.KindParseError,
+		}}, nil
+	}
+
+	if code := runSingleFileWith(parse, "bad.go", out); code != 1 {
+		t.Fatalf("error-severity exit = %d, want 1", code)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("error-severity must not write a product; stat err = %v", err)
 	}
 }

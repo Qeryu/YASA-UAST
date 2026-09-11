@@ -1,13 +1,17 @@
 // Package api is the importable library entry point for the Go UAST parser.
 //
 // Error semantics (D11):
-//   - file-level failures (a single .go file that does not parse) are recorded
-//     as ParseError and the build continues with the remaining files;
+//   - file-level failures are recorded as ParseError and the build continues;
+//     each entry carries a Severity (warning/error) and a Kind;
 //   - request-level failures (unreadable rootDir, no packages at all, ...) are
 //     returned as a plain error and no JSON is produced;
 //   - the library never calls os.Exit and never panics: the exported entry
 //     points install a recover() boundary that converts a residual panic into a
 //     request-level error.
+//
+// P3 long-lived core: parseSource takes the source bytes in memory (a
+// synchronous wasm callback cannot perform Go file I/O, D8). ParseSingleFile is
+// read-file + delegate.
 //
 // On success the returned JSON is byte-identical to the historical CLI output
 // (json.Encoder.Encode, including the trailing newline).
@@ -27,9 +31,26 @@ import (
 	"uast4go/uast"
 )
 
-// ParseError is a file-level (recoverable) error. It is an alias of
+// ParseError is a file-level (recoverable) entry. It is an alias of
 // uast.ParseError so callers of the library do not need to import uast.
 type ParseError = uast.ParseError
+
+// Severity and Kind are aliases of the uast definitions.
+type (
+	Severity = uast.Severity
+	Kind     = uast.Kind
+)
+
+const (
+	SeverityWarning = uast.SeverityWarning
+	SeverityError   = uast.SeverityError
+
+	KindParseError      = uast.KindParseError
+	KindReadError       = uast.KindReadError
+	KindUnsupportedNode = uast.KindUnsupportedNode
+	KindNoGoMod         = uast.KindNoGoMod
+	KindNoPackages      = uast.KindNoPackages
+)
 
 // Output is the top-level JSON document. Its shape and field order are frozen
 // for CLI compatibility.
@@ -40,17 +61,35 @@ type Output struct {
 	NumOfGoMod  int                   `json:"numOfGoMod"`
 }
 
-// ParseSingleFile parses one Go file and returns the encoded JSON document.
+// HasErrors reports whether errs contains at least one error-severity entry.
+// Warning-severity entries are informational and do not block product output.
+func HasErrors(errs []ParseError) bool {
+	for _, e := range errs {
+		if e.Severity == SeverityError {
+			return true
+		}
+	}
+	return false
+}
+
+// parseSource builds the UAST for one in-memory Go source file. name is used
+// verbatim as the filename in loc/sourcefile, so passing the same name as the
+// CLI's -rootDir value yields byte-identical JSON.
 //
-// A syntax error in the file is reported in errs (file-level) with nil JSON;
-// err is reserved for request-level/panic failures.
-func ParseSingleFile(path string) (jsonBytes []byte, errs []ParseError, err error) {
-	defer recoverBoundary("ParseSingleFile", path, &jsonBytes, &errs, &err)
+// A syntax error is reported in errs (error/parse_error) with nil JSON; err is
+// reserved for request-level/panic failures.
+func parseSource(name string, src []byte) (jsonBytes []byte, errs []ParseError, err error) {
+	defer recoverBoundary("parseSource", name, &jsonBytes, &errs, &err)
 
 	fset := token.NewFileSet()
-	f, perr := parser.ParseFile(fset, path, nil, parser.DeclarationErrors)
+	f, perr := parser.ParseFile(fset, name, src, parser.DeclarationErrors)
 	if perr != nil {
-		return nil, []ParseError{{File: path, Message: perr.Error()}}, nil
+		return nil, []ParseError{{
+			File:     name,
+			Message:  perr.Error(),
+			Severity: SeverityError,
+			Kind:     KindParseError,
+		}}, nil
 	}
 	pkg := &ast.Package{
 		Name:    "__single__",
@@ -58,10 +97,13 @@ func ParseSingleFile(path string) (jsonBytes []byte, errs []ParseError, err erro
 		Imports: nil,
 		Files:   make(map[string]*ast.File),
 	}
-	pkg.Files[path] = f
+	pkg.Files[name] = f
 	packages := map[string]*ast.Package{"__single__": pkg}
 
-	packageInfo, buildErrs := buildPackage("__single_module__", packages, fset)
+	packageInfo, buildErrs, berr := buildPackage("__single_module__", packages, fset)
+	if berr != nil {
+		return nil, buildErrs, berr
+	}
 	out := &Output{
 		PackageInfo: packageInfo,
 		ModuleName:  "__single_module__",
@@ -73,11 +115,30 @@ func ParseSingleFile(path string) (jsonBytes []byte, errs []ParseError, err erro
 	return b, buildErrs, nil
 }
 
+// ParseSingleFile reads path and delegates to parseSource. The read is the only
+// filesystem access; a read failure is reported as a file-level
+// error/read_error (not a request-level error), matching the single-file
+// parse-failure exit semantics (exit 1, no product).
+func ParseSingleFile(path string) (jsonBytes []byte, errs []ParseError, err error) {
+	defer recoverBoundary("ParseSingleFile", path, &jsonBytes, &errs, &err)
+
+	src, rerr := os.ReadFile(path)
+	if rerr != nil {
+		return nil, []ParseError{{
+			File:     path,
+			Message:  rerr.Error(),
+			Severity: SeverityError,
+			Kind:     KindReadError,
+		}}, nil
+	}
+	return parseSource(path, src)
+}
+
 // ParseProject parses every package under rootDir and returns the encoded JSON
 // document. Individual unparseable files do not abort the scan: they are
-// reported in errs and the remaining files are still emitted. A missing go.mod
-// is reported as a file-level warning and the historical
-// "__unknown_module__" fallback is kept.
+// reported in errs (error/parse_error) and the remaining files are still
+// emitted. A missing go.mod is reported as a warning (warning/no_gomod) and the
+// historical "__unknown_module__" fallback is kept.
 func ParseProject(rootDir string) (jsonBytes []byte, errs []ParseError, err error) {
 	defer recoverBoundary("ParseProject", rootDir, &jsonBytes, &errs, &err)
 
@@ -86,11 +147,21 @@ func ParseProject(rootDir string) (jsonBytes []byte, errs []ParseError, err erro
 	goModPaths, gerr := findAllGoMod(rootDir)
 	moduleName := "__unknown_module__"
 	if gerr != nil {
-		errs = append(errs, ParseError{File: rootDir, Message: gerr.Error()})
+		errs = append(errs, ParseError{
+			File:     rootDir,
+			Message:  gerr.Error(),
+			Severity: SeverityWarning,
+			Kind:     KindNoGoMod,
+		})
 	} else {
 		name, rerr := readModuleName(goModPaths[0])
 		if rerr != nil {
-			errs = append(errs, ParseError{File: goModPaths[0], Message: rerr.Error()})
+			errs = append(errs, ParseError{
+				File:     goModPaths[0],
+				Message:  rerr.Error(),
+				Severity: SeverityWarning,
+				Kind:     KindNoGoMod,
+			})
 		}
 		moduleName = name
 	}
@@ -109,8 +180,11 @@ func ParseProject(rootDir string) (jsonBytes []byte, errs []ParseError, err erro
 	if goModPaths != nil {
 		firstGoModPath = goModPaths[0]
 	}
-	packageInfo, buildErrs := buildPackage(moduleName, packages, fset)
+	packageInfo, buildErrs, berr := buildPackage(moduleName, packages, fset)
 	errs = append(errs, buildErrs...)
+	if berr != nil {
+		return nil, errs, berr
+	}
 
 	out := &Output{
 		PackageInfo: packageInfo,
@@ -142,7 +216,12 @@ func ParsePackage(dir string, fset *token.FileSet) (packageName string, files ma
 		path := filepath.Join(dir, entry.Name())
 		f, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {
-			errs = append(errs, ParseError{File: path, Message: perr.Error()})
+			errs = append(errs, ParseError{
+				File:     path,
+				Message:  perr.Error(),
+				Severity: SeverityError,
+				Kind:     KindParseError,
+			})
 			continue
 		}
 		name := f.Name.Name
@@ -165,7 +244,7 @@ func preparePackage(rootDir string, fset *token.FileSet) (map[string]*ast.Packag
 		if walkErr != nil {
 			return walkErr
 		}
-		if !info.IsDir() || !ContainsGoFiles(path) || strings.Contains(path, "/vendor") {
+		if !info.IsDir() || !containsGoFiles(path) || strings.Contains(path, "/vendor") {
 			return nil
 		}
 		if strings.HasPrefix(info.Name(), ".") {
@@ -176,7 +255,12 @@ func preparePackage(rootDir string, fset *token.FileSet) (map[string]*ast.Packag
 		errs = append(errs, perrs...)
 		if perr != nil {
 			// 文件级：记录并继续处理其它目录，不再中止整次扫描。
-			errs = append(errs, ParseError{File: path, Message: perr.Error()})
+			errs = append(errs, ParseError{
+				File:     path,
+				Message:  perr.Error(),
+				Severity: SeverityWarning,
+				Kind:     KindNoPackages,
+			})
 			return nil
 		}
 
@@ -196,16 +280,16 @@ func preparePackage(rootDir string, fset *token.FileSet) (map[string]*ast.Packag
 	return packages, errs, nil
 }
 
-// buildPackage runs the UAST builder; file-level errors collected by the
-// builder are returned alongside the result.
-func buildPackage(moduleName string, packages map[string]*ast.Package, fset *token.FileSet) (*uast.PackagePathInfo, []ParseError) {
+// buildPackage runs the UAST builder. A GetResult failure is a request-level
+// error (never a packageInfo:null product with exit 0).
+func buildPackage(moduleName string, packages map[string]*ast.Package, fset *token.FileSet) (*uast.PackagePathInfo, []ParseError, error) {
 	b := uast.NewUASTBuilder(moduleName, packages, fset)
 	b.Build()
 	res, err := b.GetResult()
 	if err != nil {
-		return nil, append(b.Errors(), uast.ParseError{Message: err.Error()})
+		return nil, b.Errors(), fmt.Errorf("build package %s: %w", moduleName, err)
 	}
-	return res, b.Errors()
+	return res, b.Errors(), nil
 }
 
 func encodeOutput(out *Output) ([]byte, error) {
@@ -277,8 +361,8 @@ func readModuleName(modFilePath string) (string, error) {
 	return "", fmt.Errorf("module directive not found in %s", modFilePath)
 }
 
-// ContainsGoFiles reports whether dir directly contains a .go file.
-func ContainsGoFiles(dir string) bool {
+// containsGoFiles reports whether dir directly contains a .go file.
+func containsGoFiles(dir string) bool {
 	list, err := os.ReadDir(dir)
 	if err != nil {
 		return false

@@ -1,6 +1,6 @@
 module uast4go
 
-go 1.27.0
+go 1.22
 
 toolchain go1.27.1
 
