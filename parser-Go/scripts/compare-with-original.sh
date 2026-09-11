@@ -63,7 +63,7 @@ if [ -n "$diff_list" ]; then
   for f in $diff_list; do echo "    -$f"; done
 fi
 
-echo "[4/4] 项目模式（忽略 tmpN）"
+echo "[4/4] 项目模式（忽略 tmpN；信息性，不计入退出码）"
 proj_rc=0
 "$OUT/uast4go-original" -rootDir=examples -output="$OUT/o-proj.json" >/dev/null 2>&1 || true
 "$OUT/uast4go-current" -rootDir=examples -output="$OUT/c-proj.json" >/dev/null 2>&1 || true
@@ -72,7 +72,8 @@ sed 's/tmp[0-9]*/tmpX/g' "$OUT/c-proj.json" > "$OUT/c.norm"
 if cmp -s "$OUT/o.norm" "$OUT/c.norm"; then
   echo "  一致"
 else
-  echo "  有差异（注意原版选包随机，见 wasm-plan §5.4）"
+  echo "  有差异 —— 这是原版既有缺陷：目录内随机选包（main.go:27-29，本次不修，见 wasm-plan §5.4）；"
+  echo "  项目模式的严格对比不可用，以单文件逐字节 + Engine benchmark 为准。"
   proj_rc=1
 fi
 
