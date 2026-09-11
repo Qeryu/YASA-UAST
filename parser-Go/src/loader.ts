@@ -13,16 +13,19 @@ export interface ParseError {
 
 /** Raw response envelope produced by the resident wasm handler. */
 export interface GoResponse {
+  /** Protocol version (internal loader/handler envelope). */
+  v?: number
   ok: boolean
   /** CLI-equivalent JSON string (present iff ok). */
   data?: string
   errors?: ParseError[]
 }
 
-/** Absolute path of the staged wasm assets shipped inside the package. */
-const WASM_DIR = path.join(__dirname, '..', '..', 'dist-wasm')
-const WASM_EXEC = path.join(WASM_DIR, 'wasm_exec.js')
-const WASM_BIN = path.join(WASM_DIR, 'uast4go.wasm')
+/** Internal protocol version; bump when the request/response shape changes. */
+export const PROTOCOL_VERSION = 1
+
+/** Absolute path of the wasm binary shipped inside the package. */
+const WASM_BIN = path.join(__dirname, '..', '..', 'dist-wasm', 'uast4go.wasm')
 
 const EXPORT_NAME = '__uastGoParse'
 
@@ -63,9 +66,15 @@ async function waitForExport(name: string, timeoutMs = 5000): Promise<void> {
   }
 }
 
+/** Drop the resident instance so a subsequent init() builds a fresh one. */
+function resetInstance(): void {
+  ready = false
+  initPromise = null
+}
+
 /**
- * Load and start the resident wasm instance. Idempotent: repeated calls share
- * one instance and one Promise.
+ * Load and start the resident wasm instance. Idempotent while it succeeds; a
+ * failed init resets the singleton so callers may retry.
  */
 export async function init(): Promise<void> {
   if (ready) return
@@ -74,8 +83,10 @@ export async function init(): Promise<void> {
   initPromise = (async () => {
     prepareGlobals()
 
-    // pkg-safe: load by path.join (pkg mangles require.resolve for wasm assets).
-    require(WASM_EXEC)
+    // pkg-safe: a STATIC string literal so pkg's static analysis can see the
+    // asset at build time. A runtime-assembled path (path.join(...)) would be
+    // invisible to pkg. (Real pkg snapshot verification is P4.)
+    require('../../dist-wasm/wasm_exec.js')
 
     const GoCtor = (globalThis as unknown as Record<string, unknown>).Go
     if (typeof GoCtor !== 'function') {
@@ -106,7 +117,11 @@ export async function init(): Promise<void> {
 
     await waitForExport(EXPORT_NAME)
     ready = true
-  })()
+  })().catch((err) => {
+    // A failed init must not poison the singleton: allow a clean retry.
+    resetInstance()
+    throw err
+  })
 
   return initPromise
 }
@@ -119,18 +134,36 @@ export function isReady(): boolean {
  * Synchronously invoke the resident wasm parser. Calls are serialized by
  * construction (the Go callback is synchronous and JS cannot interleave it).
  * Never throws for `ok:false` — the Parser maps that to a JS Error and keeps
- * `errors` visible.
+ * `errors` visible. A throw from the export (e.g. a wasm trap) drops the
+ * instance so a later init() can rebuild it.
  */
 export function call(request: unknown): GoResponse {
   if (!ready) {
     throw new Error('Parser is not initialized; await parser.init() first')
   }
-  const raw = (globalThis as unknown as Record<string, (s: string) => string>)[EXPORT_NAME](
-    JSON.stringify(request)
-  )
+
+  let raw: string
   try {
-    return JSON.parse(raw) as GoResponse
+    const payload = Object.assign({ v: PROTOCOL_VERSION }, request as Record<string, unknown>)
+    raw = (globalThis as unknown as Record<string, (s: string) => string>)[EXPORT_NAME](
+      JSON.stringify(payload)
+    )
   } catch (e) {
+    resetInstance()
+    throw e
+  }
+
+  let resp: GoResponse
+  try {
+    resp = JSON.parse(raw) as GoResponse
+  } catch (e) {
+    resetInstance()
     throw new Error(`invalid response from wasm: ${String(e)}`)
   }
+
+  if (resp.v !== PROTOCOL_VERSION) {
+    resetInstance()
+    throw new Error(`protocol version mismatch: expected ${PROTOCOL_VERSION}, got ${String(resp.v)}`)
+  }
+  return resp
 }

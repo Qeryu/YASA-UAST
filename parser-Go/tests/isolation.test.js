@@ -24,3 +24,18 @@ test('repeated calls are deterministic and A->B->A has no state leak', async () 
   assert.equal(a1, a2, 'A -> B -> A must not leak state')
   assert.notEqual(a1, b, 'different inputs should differ')
 })
+
+test('project mode A->B->A is deterministic (no cross-call state leak)', async () => {
+  const parser = new Parser()
+  await parser.init()
+
+  const A = [{ name: 'a.go', content: 'package p\n\nfunc A() int { return 1 }\n' }]
+  const B = [{ name: 'b.go', content: 'package q\n\nfunc B() string { return "b" }\n' }]
+
+  const a1 = JSON.stringify(parser.parseProject(A))
+  parser.parseProject(B)
+  const a2 = JSON.stringify(parser.parseProject(A))
+
+  assert.equal(a1, a2, 'project A -> B -> A must be identical')
+})
+

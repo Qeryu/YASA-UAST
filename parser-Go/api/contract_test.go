@@ -130,3 +130,138 @@ func buildContractCLI(t *testing.T, dir string) string {
 	}
 	return bin
 }
+
+func writeContractFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sourcesFromTree(t *testing.T, root string) []SourceFile {
+	t.Helper()
+	var files []SourceFile
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		content, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		files = append(files, SourceFile{Name: path, Content: content})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func mustRunProjectCLI(t *testing.T, cli, rootDir string) []byte {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "cli.json")
+	cmd := exec.Command(cli, "-rootDir="+rootDir, "-output="+out)
+	cmd.Dir = ".."
+	if combined, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("CLI -rootDir=%s failed: %v\n%s", rootDir, err, combined)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read CLI output: %v", err)
+	}
+	return b
+}
+
+// TestParseSourcesDotDirs locks the CLI's filepath.Walk pruning semantics:
+// a dot directory is pruned (with its subtree) only when it directly contains a
+// .go file; a dot directory with no direct .go files is descended into and its
+// descendants are parsed.
+func TestParseSourcesDotDirs(t *testing.T) {
+	cli := buildContractCLI(t, "..")
+
+	t.Run("dot-dir-with-direct-go-prunes-subtree", func(t *testing.T) {
+		dir := t.TempDir()
+		writeContractFile(t, filepath.Join(dir, "go.mod"), "module fixture\n\ngo 1.22\n")
+		writeContractFile(t, filepath.Join(dir, "keep.go"), "package fixture\n\nfunc Keep() {}\n")
+		writeContractFile(t, filepath.Join(dir, ".hidden", "a.go"), "package hidden\n\nfunc A() {}\n")
+		writeContractFile(t, filepath.Join(dir, ".hidden", "sub", "x.go"), "package sub\n\nfunc X() {}\n")
+
+		cliBytes := mustRunProjectCLI(t, cli, dir)
+		memBytes, errs, perr := ParseSources(sourcesFromTree(t, dir))
+		if perr != nil {
+			t.Fatalf("ParseSources: %v", perr)
+		}
+		if len(errs) != 0 {
+			t.Fatalf("ParseSources errs = %+v, want none", errs)
+		}
+		got := string(memBytes)
+		if !bytes.Contains(memBytes, []byte("keep.go")) {
+			t.Fatalf("keep.go missing from memory output:\n%s", got)
+		}
+		if bytes.Contains(memBytes, []byte(".hidden")) {
+			t.Fatalf("pruned dot-dir leaked into memory output:\n%s", got)
+		}
+		if normalizeTmpN(string(cliBytes)) != normalizeTmpN(got) {
+			t.Fatalf("memory differs from CLI\nCLI:\n%s\nmem:\n%s", normalizeTmpN(string(cliBytes)), normalizeTmpN(got))
+		}
+	})
+
+	t.Run("dot-dir-without-direct-go-is-descended", func(t *testing.T) {
+		dir := t.TempDir()
+		writeContractFile(t, filepath.Join(dir, "go.mod"), "module fixture\n\ngo 1.22\n")
+		writeContractFile(t, filepath.Join(dir, "keep.go"), "package fixture\n\nfunc Keep() {}\n")
+		writeContractFile(t, filepath.Join(dir, ".hidden", "sub", "x.go"), "package sub\n\nfunc X() {}\n")
+
+		cliBytes := mustRunProjectCLI(t, cli, dir)
+		memBytes, errs, perr := ParseSources(sourcesFromTree(t, dir))
+		if perr != nil {
+			t.Fatalf("ParseSources: %v", perr)
+		}
+		if len(errs) != 0 {
+			t.Fatalf("ParseSources errs = %+v, want none", errs)
+		}
+		got := string(memBytes)
+		if !bytes.Contains(memBytes, []byte(".hidden")) {
+			t.Fatalf("descendant of dot-dir should be parsed:\n%s", got)
+		}
+		if normalizeTmpN(string(cliBytes)) != normalizeTmpN(got) {
+			t.Fatalf("memory differs from CLI\nCLI:\n%s\nmem:\n%s", normalizeTmpN(string(cliBytes)), normalizeTmpN(got))
+		}
+	})
+}
+
+// TestParseSourcesExplicitRoot verifies the optional root overrides the
+// common-ancestor heuristic and matches the CLI -rootDir value (here the
+// parent of the module dir, so package paths become /mod and /mod/sub).
+func TestParseSourcesExplicitRoot(t *testing.T) {
+	cli := buildContractCLI(t, "..")
+	base := t.TempDir()
+	modDir := filepath.Join(base, "mod")
+	writeContractFile(t, filepath.Join(modDir, "go.mod"), "module fixture\n\ngo 1.22\n")
+	writeContractFile(t, filepath.Join(modDir, "a.go"), "package fixture\n\nfunc A() {}\n")
+	writeContractFile(t, filepath.Join(modDir, "sub", "b.go"), "package sub\n\nfunc B() {}\n")
+
+	cliBytes := mustRunProjectCLI(t, cli, base) // -rootDir = parent
+	memBytes, errs, perr := ParseSources(sourcesFromTree(t, base), base)
+	if perr != nil {
+		t.Fatalf("ParseSources: %v", perr)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("ParseSources errs = %+v, want none", errs)
+	}
+	if normalizeTmpN(string(cliBytes)) != normalizeTmpN(string(memBytes)) {
+		t.Fatalf("explicit root differs from CLI -rootDir=%s\nCLI:\n%s\nmem:\n%s",
+			base, normalizeTmpN(string(cliBytes)), normalizeTmpN(string(memBytes)))
+	}
+	// Explicit root must widen package paths beyond the common ancestor.
+	if !bytes.Contains(memBytes, []byte("/mod")) {
+		t.Fatalf("explicit root not applied; no /mod package path in:\n%s", string(memBytes))
+	}
+}

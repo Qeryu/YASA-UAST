@@ -2,9 +2,16 @@ import { call, init as initLoader, isReady, ParseError } from './loader'
 
 export type { ParseError } from './loader'
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const pkg = require('../../package.json') as { version?: string }
+
+/** Package version (mirrors package.json; injected at publish time in CI). */
+export const version: string = pkg.version ?? '0.0.0'
+
 /** Language discriminator, aligned with the java/js/php parser packages. */
 export enum LanguageType {
-  LANG_GO = 'go',
+  // The Engine keys Go by the string 'golang' (parser.ts), not 'go'.
+  LANG_GO = 'golang',
   OTHER = 'other',
 }
 
@@ -12,6 +19,17 @@ export enum LanguageType {
 export interface SourceFile {
   name: string
   content: string
+}
+
+/** Options accepted by {@link Parser.parse} (java/php-style `sourcefile`). */
+export interface ParseOptions {
+  sourcefile?: string
+}
+
+/** Options accepted by {@link Parser.parseProject}. */
+export interface ParseProjectOptions {
+  /** Explicit module root, matching the CLI `-rootDir` value. */
+  root?: string
 }
 
 /**
@@ -30,6 +48,13 @@ export interface SourceFile {
 export class Parser {
   private initialized = false
   private lastErrorList: ParseError[] = []
+
+  /**
+   * Options are accepted for symmetry with the java/js/php parser packages and
+   * are currently ignored.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public constructor(_opts?: Record<string, unknown>) {}
 
   /** Load the wasm instance. Must be awaited once before any parse call. */
   public async init(): Promise<void> {
@@ -66,15 +91,26 @@ export class Parser {
   }
 
   /**
-   * Parse a set of in-memory source files as a project (mirrors the CLI
-   * `-rootDir` package tree). Returns the UAST object; file-level errors are in
-   * {@link lastErrors}.
+   * java/php-style alias: parse content, using `opts.sourcefile` as the
+   * loc.sourcefile name (falls back to '').
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  public parseProject(files: SourceFile[]): any {
+  public parse(content: string, opts?: ParseOptions): any {
+    return this.parseSource(opts?.sourcefile ?? '', content)
+  }
+
+  /**
+   * Parse a set of in-memory source files as a project (mirrors the CLI
+   * `-rootDir` package tree). Pass `opts.root` to make the virtual root
+   * explicit instead of using the common-ancestor heuristic. Returns the UAST
+   * object; file-level errors are in {@link lastErrors}.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  public parseProject(files: SourceFile[], opts?: ParseProjectOptions): any {
     this.ensureInit()
     const resp = call({
       mode: 'project',
+      root: opts?.root ?? '',
       files: files.map((f) => ({ name: f.name, content: f.content })),
     })
     this.lastErrorList = resp.errors ?? []

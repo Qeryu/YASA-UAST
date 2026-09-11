@@ -2,6 +2,29 @@
 
 uast4go 是 YASA 项目的 Go 语言解析器，用于提取代码的统一抽象语法树（UAST）
 
+## npm 包：`@ant-yasa/uast-parser-go`
+
+同一份 Go parser 也以常驻 wasm 形式随 npm 分发（无需安装 Go，进程内同步调用）：
+
+```ts
+const { Parser, LanguageType, version } = require('@ant-yasa/uast-parser-go')
+
+const parser = new Parser()
+await parser.init()
+
+const obj = parser.parseSource('examples/x.go', code)      // 同步，返回 UAST 对象
+const raw = parser.parseSourceRaw('examples/x.go', code)   // 同步，返回与 CLI -single 逐字节一致的 JSON 字符串
+const proj = parser.parseProject([{ name: '/abs/a.go', content: '...' }]) // 项目模式（内存）
+const proj2 = parser.parseProject(files, { root: '/abs' }) // 显式 root，等价 CLI -rootDir=/abs
+
+parser.parse(code, { sourcefile: 'x.go' })                 // java/php 风格别名
+parser.lastErrors                                          // 最近一次调用的 file-level errors/warnings
+```
+
+- wasm 资产：`npm run build:wasm` → `dist-wasm/{uast4go.wasm,wasm_exec.js}`；脚本只依赖 PATH 上的 `go`（不依赖开发用 `env.sh`）。
+- 测试：`npm test`（先自动 `build` + `build:wasm`，再 `node --test`）。
+- 错误语义：单文件 `error` 级 → 抛错且无产物；仅 `warning` → 返回对象并在 `lastErrors` 暴露；项目模式局部失败 → 返回对象 + `lastErrors`（详见 `api` 包 D11 说明）。
+
 ## 构建二进制（支持多平台）
 
 你可以使用 Go 原生命令构建适用于不同操作系统的可执行文件。

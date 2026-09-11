@@ -214,7 +214,8 @@ type SourceFile struct {
 
 // ParseSources is the exported in-memory project-mode entry point (P3). It
 // mirrors the CLI -rootDir behavior for the same logical tree:
-//   - the virtual root is the common ancestor directory of the file names;
+//   - the virtual root is root[0] when given, else the common ancestor
+//     directory of the file names;
 //   - package paths are "/"+relative-dir (matching preparePackage);
 //   - the module name comes from the shallowest provided go.mod;
 //   - a missing go.mod is a warning/no_gomod and keeps __unknown_module__.
@@ -222,13 +223,19 @@ type SourceFile struct {
 // A bad file is a file-level error/parse_error and does not discard the good
 // files. Output is identical to the CLI for equivalent input after tmpN
 // normalization (cross-file order inside a package follows Go map iteration).
-func ParseSources(files []SourceFile) (jsonBytes []byte, errs []ParseError, err error) {
+func ParseSources(files []SourceFile, rootArg ...string) (jsonBytes []byte, errs []ParseError, err error) {
 	defer recoverBoundary("ParseSources", "<memory>", &jsonBytes, &errs, &err)
 
 	if len(files) == 0 {
 		return nil, nil, fmt.Errorf("no source files provided")
 	}
 	root := commonRoot(files)
+	if len(rootArg) > 0 && rootArg[0] != "" {
+		// Explicit root wins (caller knows the module root, e.g. Engine's
+		// project directory); it must be the same string the CLI would pass to
+		// -rootDir for byte-identical package paths.
+		root = rootArg[0]
+	}
 	fset := token.NewFileSet()
 
 	var goModPaths []string
@@ -505,43 +512,44 @@ func isParentRef(rel string) bool {
 	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// preparePackagesFromSources mirrors preparePackage, but over in-memory files:
-// group by directory, parse each .go file individually (a bad file is recorded,
-// not fatal), then pick one package name per directory via map iteration (O1
-// preserved). Vendor and dot directories are skipped like the CLI does.
+// preparePackagesFromSources mirrors preparePackage, but over in-memory files.
+// It reproduces the CLI's filepath.Walk pruning semantics exactly:
+//   - a directory whose base starts with "." is pruned together with its whole
+//     subtree only when it directly contains a .go file (the CLI checks
+//     ContainsGoFiles before its dot check, so a dot directory without direct
+//     .go files is descended into and its descendants are parsed);
+//   - paths containing /vendor are excluded;
+//   - each .go file is parsed individually (a bad file is recorded, not fatal);
+//   - one package name per directory is chosen via map iteration (O1 preserved).
 func preparePackagesFromSources(root string, files []SourceFile, fset *token.FileSet) (map[string]*ast.Package, []ParseError) {
 	packages := make(map[string]*ast.Package)
 	var errs []ParseError
 
+	dirHasGo := make(map[string]bool)
+	for _, f := range files {
+		if strings.HasSuffix(f.Name, ".go") {
+			dirHasGo[filepath.Dir(f.Name)] = true
+		}
+	}
+
 	byDir := make(map[string][]SourceFile)
 	for _, f := range files {
+		if !strings.HasSuffix(f.Name, ".go") {
+			continue
+		}
 		dir := filepath.Dir(f.Name)
 		if strings.Contains(filepath.ToSlash(dir), "/vendor") {
 			continue
 		}
-		if base := filepath.Base(dir); strings.HasPrefix(base, ".") && base != "." && base != ".." {
+		if prunedByDotDir(root, dir, dirHasGo) {
 			continue
 		}
 		byDir[dir] = append(byDir[dir], f)
 	}
 
 	for dir, dirFiles := range byDir {
-		hasGo := false
-		for _, f := range dirFiles {
-			if strings.HasSuffix(f.Name, ".go") {
-				hasGo = true
-				break
-			}
-		}
-		if !hasGo {
-			continue
-		}
-
 		pkgs := make(map[string]map[string]*ast.File)
 		for _, f := range dirFiles {
-			if !strings.HasSuffix(f.Name, ".go") {
-				continue
-			}
 			file, perr := parser.ParseFile(fset, f.Name, f.Content, 0)
 			if perr != nil {
 				errs = append(errs, ParseError{
@@ -570,6 +578,27 @@ func preparePackagesFromSources(root string, files []SourceFile, fset *token.Fil
 		}
 	}
 	return packages, errs
+}
+
+// prunedByDotDir reports whether dir sits inside a subtree the CLI would prune
+// with filepath.SkipDir. The CLI only returns SkipDir for a dot directory that
+// directly contains a .go file; a dot directory with no direct .go files is
+// descended into (its descendants may still be parsed).
+func prunedByDotDir(root, dir string, dirHasGo map[string]bool) bool {
+	for cur := dir; ; {
+		base := filepath.Base(cur)
+		if base != "." && base != ".." && strings.HasPrefix(base, ".") && dirHasGo[cur] {
+			return true
+		}
+		if cur == root {
+			return false
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
 }
 
 // containsGoFiles reports whether dir directly contains a .go file.

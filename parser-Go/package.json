@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc",
     "build:wasm": "bash scripts/build-wasm.sh",
-    "test": "npm run build && node --test tests/*.test.js",
+    "pretest": "npm run build && npm run build:wasm",
+    "test": "node --test tests/*.test.js",
     "prepack": "npm run build && npm run build:wasm"
   },
   "publishConfig": {

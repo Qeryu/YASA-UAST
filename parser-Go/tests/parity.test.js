@@ -20,6 +20,23 @@ const EXAMPLES = [
   'examples/select.go',
 ]
 
+test('parseSourceRaw with an absolute path matches -single CLI (Engine uses abs paths)', async () => {
+  const parser = new Parser()
+  await parser.init()
+
+  const rel = 'examples/method.go'
+  const abs = path.join(ROOT, rel)
+  const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'uast4go-abs-')), 'out.json')
+
+  runCLI(['-single', `-rootDir=${abs}`, `-output=${out}`])
+  const cli = fs.readFileSync(out, 'utf8')
+  const raw = parser.parseSourceRaw(abs, fs.readFileSync(abs, 'utf8'))
+
+  assert.equal(raw, cli, 'absolute-path output must match -single CLI')
+  // The loc.sourcefile must carry the absolute path verbatim.
+  assert.ok(JSON.parse(raw).packageInfo.subs['/'].files[abs], 'sourcefile key should be the absolute path')
+})
+
 test('parseSourceRaw is byte-identical to -single CLI on >=6 examples', async () => {
   assert.ok(EXAMPLES.length >= 6, 'need >= 6 examples')
   const parser = new Parser()
