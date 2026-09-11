@@ -15,11 +15,10 @@ func normalizeTmpN(s string) string {
 	return tmpNRe.ReplaceAllString(s, "tmpX")
 }
 
-// TestParseSourceMatchesSingleCLI is the P3 prerequisite contract: the in-memory
-// core parseSource(name, src) must produce byte-identical JSON to the `-single`
-// CLI path (which is now read-file + delegate to the same core). This pins the
-// serialization (json.Encoder, trailing newline) and the loc/sourcefile naming
-// before the wasm resident API starts consuming parseSource.
+// TestParseSourceMatchesSingleCLI 是 P3 的前置契约：内存核心
+// parseSource(name, src) 必须产出与 `-single` CLI 路径（现为读文件 + 委派到同一
+// 核心）逐字节一致的 JSON。它在 wasm 常驻 API 开始消费 parseSource 之前，锁定
+// 序列化（json.Encoder、末尾换行）与 loc/sourcefile 命名。
 func TestParseSourceMatchesSingleCLI(t *testing.T) {
 	const pgDir = ".."
 	examples := []string{
@@ -39,7 +38,7 @@ func TestParseSourceMatchesSingleCLI(t *testing.T) {
 	for _, rel := range examples {
 		rel := rel
 		t.Run(rel, func(t *testing.T) {
-			// CLI path: path is used verbatim as sourcefile.
+			// CLI 路径：path 原样用作 sourcefile。
 			out := filepath.Join(t.TempDir(), "cli.json")
 			cmd := exec.Command(cli, "-single", "-rootDir="+rel, "-output="+out)
 			cmd.Dir = pgDir
@@ -51,7 +50,7 @@ func TestParseSourceMatchesSingleCLI(t *testing.T) {
 				t.Fatalf("read CLI output: %v", err)
 			}
 
-			// In-memory path.
+			// 内存路径。
 			src, err := os.ReadFile(filepath.Join(pgDir, rel))
 			if err != nil {
 				t.Fatalf("read source: %v", err)
@@ -72,9 +71,9 @@ func TestParseSourceMatchesSingleCLI(t *testing.T) {
 	}
 }
 
-// TestParseSourcesMatchesProjectCLI is the in-memory project contract: for a
-// single-package fixture, ParseSources(files) must match the CLI -rootDir output
-// after tmpN normalization (cross-file order inside a package is map-ordered).
+// TestParseSourcesMatchesProjectCLI 是内存项目契约：对单 package fixture，
+// ParseSources(files) 在 tmpN 归一化后必须与 CLI `-rootDir` 输出一致（同一
+// package 内的跨文件顺序由 map 决定）。
 func TestParseSourcesMatchesProjectCLI(t *testing.T) {
 	const pgDir = ".."
 	dir := t.TempDir()
@@ -179,10 +178,9 @@ func mustRunProjectCLI(t *testing.T, cli, rootDir string) []byte {
 	return b
 }
 
-// TestParseSourcesDotDirs locks the CLI's filepath.Walk pruning semantics:
-// a dot directory is pruned (with its subtree) only when it directly contains a
-// .go file; a dot directory with no direct .go files is descended into and its
-// descendants are parsed.
+// TestParseSourcesDotDirs 锁定 CLI 的 filepath.Walk 剪枝语义：dot 目录仅当
+// **直接包含 .go 文件**时才连同子树被剪掉；没有直接 .go 文件的 dot 目录会被
+// 下钻，其子孙会被解析。
 func TestParseSourcesDotDirs(t *testing.T) {
 	cli := buildContractCLI(t, "..")
 
@@ -237,9 +235,9 @@ func TestParseSourcesDotDirs(t *testing.T) {
 	})
 }
 
-// TestParseSourcesExplicitRoot verifies the optional root overrides the
-// common-ancestor heuristic and matches the CLI -rootDir value (here the
-// parent of the module dir, so package paths become /mod and /mod/sub).
+// TestParseSourcesExplicitRoot 验证可选 root 覆盖共同祖先启发式，并与 CLI
+// `-rootDir` 值一致（这里取 module 目录的父目录，因此 package 路径变为 /mod
+// 与 /mod/sub）。
 func TestParseSourcesExplicitRoot(t *testing.T) {
 	cli := buildContractCLI(t, "..")
 	base := t.TempDir()
@@ -248,7 +246,7 @@ func TestParseSourcesExplicitRoot(t *testing.T) {
 	writeContractFile(t, filepath.Join(modDir, "a.go"), "package fixture\n\nfunc A() {}\n")
 	writeContractFile(t, filepath.Join(modDir, "sub", "b.go"), "package sub\n\nfunc B() {}\n")
 
-	cliBytes := mustRunProjectCLI(t, cli, base) // -rootDir = parent
+	cliBytes := mustRunProjectCLI(t, cli, base) // -rootDir = 父目录
 	memBytes, errs, perr := ParseSources(sourcesFromTree(t, base), base)
 	if perr != nil {
 		t.Fatalf("ParseSources: %v", perr)
@@ -260,7 +258,7 @@ func TestParseSourcesExplicitRoot(t *testing.T) {
 		t.Fatalf("explicit root differs from CLI -rootDir=%s\nCLI:\n%s\nmem:\n%s",
 			base, normalizeTmpN(string(cliBytes)), normalizeTmpN(string(memBytes)))
 	}
-	// Explicit root must widen package paths beyond the common ancestor.
+	// 显式 root 必须把 package 路径扩展到共同祖先之外。
 	if !bytes.Contains(memBytes, []byte("/mod")) {
 		t.Fatalf("explicit root not applied; no /mod package path in:\n%s", string(memBytes))
 	}

@@ -9,13 +9,13 @@ test('an export throw marks the instance not-ready and a later init recovers', a
   const parser = new Parser()
   await parser.init()
 
-  // Simulate a wasm trap on the registered export.
+  // 模拟注册 export 上发生一次 wasm trap。
   globalThis.__uastGoParse = () => {
     throw new Error('boom')
   }
   assert.throws(() => parser.parseSource('x.go', 'package p\n\nfunc F() {}\n'), /boom/)
 
-  // The loader dropped the poisoned instance; a fresh init must rebuild and work.
+  // loader 已丢弃中毒实例；重新 init 必须能重建并正常工作。
   const recovered = new Parser()
   await recovered.init()
   const obj = recovered.parseSource('x.go', 'package p\n\nfunc F() {}\n')

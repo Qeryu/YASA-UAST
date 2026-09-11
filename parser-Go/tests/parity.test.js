@@ -9,8 +9,7 @@ const path = require('node:path')
 const { ROOT, runCLI, readExample } = require('./helpers')
 const { Parser } = require('../dist/src/index.js')
 
-// >= 6 examples covering composite literals, methods, imports, promotion,
-// assertions and select.
+// >= 6 个 examples，覆盖复合字面量、方法、导入、promotion、类型断言与 select。
 const EXAMPLES = [
   'examples/compositeLit.go',
   'examples/method.go',
@@ -33,7 +32,7 @@ test('parseSourceRaw with an absolute path matches -single CLI (Engine uses abs 
   const raw = parser.parseSourceRaw(abs, fs.readFileSync(abs, 'utf8'))
 
   assert.equal(raw, cli, 'absolute-path output must match -single CLI')
-  // The loc.sourcefile must carry the absolute path verbatim.
+  // loc.sourcefile 必须原样携带绝对路径。
   assert.ok(JSON.parse(raw).packageInfo.subs['/'].files[abs], 'sourcefile key should be the absolute path')
 })
 

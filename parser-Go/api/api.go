@@ -1,20 +1,17 @@
-// Package api is the importable library entry point for the Go UAST parser.
+// Package api 是 Go UAST parser 的可导入库入口。
 //
-// Error semantics (D11):
-//   - file-level failures are recorded as ParseError and the build continues;
-//     each entry carries a Severity (warning/error) and a Kind;
-//   - request-level failures (unreadable rootDir, no packages at all, ...) are
-//     returned as a plain error and no JSON is produced;
-//   - the library never calls os.Exit and never panics: the exported entry
-//     points install a recover() boundary that converts a residual panic into a
-//     request-level error.
+// 错误语义（D11）：
+//   - 文件级失败记录为 ParseError 并继续构建，每项带 Severity（warning/error）
+//     与 Kind；
+//   - 请求级失败（rootDir 不可读、完全没有 package 等）以普通 error 返回，
+//     不产出 JSON；
+//   - 库绝不 os.Exit、绝不 panic：导出的入口都装了 recover() 边界，把残留
+//     panic 转成请求级 error。
 //
-// P3 long-lived core: parseSource takes the source bytes in memory (a
-// synchronous wasm callback cannot perform Go file I/O, D8). ParseSingleFile is
-// read-file + delegate.
+// P3 常驻核心：parseSource 接收内存字节（同步 wasm 回调无法做 Go 文件 IO，
+// D8）。ParseSingleFile = 读文件 + 委派。
 //
-// On success the returned JSON is byte-identical to the historical CLI output
-// (json.Encoder.Encode, including the trailing newline).
+// 成功时返回的 JSON 与历史 CLI 输出逐字节一致（json.Encoder.Encode，含末尾换行）。
 package api
 
 import (
@@ -32,11 +29,11 @@ import (
 	"uast4go/uast"
 )
 
-// ParseError is a file-level (recoverable) entry. It is an alias of
-// uast.ParseError so callers of the library do not need to import uast.
+// ParseError 是一个文件级（可恢复）错误项。它是 uast.ParseError 的别名，
+// 使库调用方无需 import uast。
 type ParseError = uast.ParseError
 
-// Severity and Kind are aliases of the uast definitions.
+// Severity 与 Kind 是 uast 定义的别名。
 type (
 	Severity = uast.Severity
 	Kind     = uast.Kind
@@ -53,8 +50,7 @@ const (
 	KindNoPackages      = uast.KindNoPackages
 )
 
-// Output is the top-level JSON document. Its shape and field order are frozen
-// for CLI compatibility.
+// Output 是顶层 JSON 文档。其结构与字段顺序为兼容 CLI 而冻结。
 type Output struct {
 	PackageInfo *uast.PackagePathInfo `json:"packageInfo"`
 	ModuleName  string                `json:"moduleName"`
@@ -62,8 +58,8 @@ type Output struct {
 	NumOfGoMod  int                   `json:"numOfGoMod"`
 }
 
-// HasErrors reports whether errs contains at least one error-severity entry.
-// Warning-severity entries are informational and do not block product output.
+// HasErrors 报告 errs 中是否至少有一个 error 级错误项。
+// warning 级项仅供参考，不阻断产物输出。
 func HasErrors(errs []ParseError) bool {
 	for _, e := range errs {
 		if e.Severity == SeverityError {
@@ -73,12 +69,12 @@ func HasErrors(errs []ParseError) bool {
 	return false
 }
 
-// parseSource builds the UAST for one in-memory Go source file. name is used
-// verbatim as the filename in loc/sourcefile, so passing the same name as the
-// CLI's -rootDir value yields byte-identical JSON.
+// parseSource 为单个内存 Go 源码文件构建 UAST。name 会原样用作
+// loc/sourcefile 中的文件名，因此传入与 CLI `-rootDir` 相同的 name 可得到
+// 逐字节一致的 JSON。
 //
-// A syntax error is reported in errs (error/parse_error) with nil JSON; err is
-// reserved for request-level/panic failures.
+// 语法错误记录在 errs（error/parse_error）且 JSON 为 nil；err 仅用于
+// 请求级/panic 失败。
 func parseSource(name string, src []byte) (jsonBytes []byte, errs []ParseError, err error) {
 	defer recoverBoundary("parseSource", name, &jsonBytes, &errs, &err)
 
@@ -116,16 +112,15 @@ func parseSource(name string, src []byte) (jsonBytes []byte, errs []ParseError, 
 	return b, buildErrs, nil
 }
 
-// ParseSource is the exported in-memory single-file entry point used by the
-// wasm/npm resident parser (P3). name is used verbatim as loc.sourcefile.
+// ParseSource 是 wasm/npm 常驻 parser 使用的导出内存单文件入口（P3）。
+// name 会原样用作 loc.sourcefile。
 func ParseSource(name string, src []byte) (jsonBytes []byte, errs []ParseError, err error) {
 	return parseSource(name, src)
 }
 
-// ParseSingleFile reads path and delegates to parseSource. The read is the only
-// filesystem access; a read failure is reported as a file-level
-// error/read_error (not a request-level error), matching the single-file
-// parse-failure exit semantics (exit 1, no product).
+// ParseSingleFile 读取 path 并委派给 parseSource。读盘是唯一的文件系统访问；
+// 读取失败记为文件级 error/read_error（不是请求级 error），与单文件解析失败的
+// 退出语义一致（exit 1，无产物）。
 func ParseSingleFile(path string) (jsonBytes []byte, errs []ParseError, err error) {
 	defer recoverBoundary("ParseSingleFile", path, &jsonBytes, &errs, &err)
 
@@ -141,11 +136,10 @@ func ParseSingleFile(path string) (jsonBytes []byte, errs []ParseError, err erro
 	return parseSource(path, src)
 }
 
-// ParseProject parses every package under rootDir and returns the encoded JSON
-// document. Individual unparseable files do not abort the scan: they are
-// reported in errs (error/parse_error) and the remaining files are still
-// emitted. A missing go.mod is reported as a warning (warning/no_gomod) and the
-// historical "__unknown_module__" fallback is kept.
+// ParseProject 解析 rootDir 下的每个 package 并返回编码后的 JSON 文档。
+// 单个无法解析的文件不会中止扫描：记入 errs（error/parse_error），其余文件照常
+// 产出。缺少 go.mod 记为 warning（warning/no_gomod），并保留历史的
+// "__unknown_module__" 兜底。
 func ParseProject(rootDir string) (jsonBytes []byte, errs []ParseError, err error) {
 	defer recoverBoundary("ParseProject", rootDir, &jsonBytes, &errs, &err)
 
@@ -206,23 +200,21 @@ func ParseProject(rootDir string) (jsonBytes []byte, errs []ParseError, err erro
 	return b, errs, nil
 }
 
-// SourceFile is an in-memory source file for ParseSources.
+// SourceFile 是 ParseSources 使用的内存源码文件。
 type SourceFile struct {
 	Name    string
 	Content []byte
 }
 
-// ParseSources is the exported in-memory project-mode entry point (P3). It
-// mirrors the CLI -rootDir behavior for the same logical tree:
-//   - the virtual root is root[0] when given, else the common ancestor
-//     directory of the file names;
-//   - package paths are "/"+relative-dir (matching preparePackage);
-//   - the module name comes from the shallowest provided go.mod;
-//   - a missing go.mod is a warning/no_gomod and keeps __unknown_module__.
+// ParseSources 是导出的内存项目模式入口（P3）。它针对同一逻辑目录树复刻
+// CLI `-rootDir` 的行为：
+//   - 显式传入 root[0] 时以其为虚拟 root，否则取各文件名的共同祖先目录；
+//   - package 路径为 "/"+相对目录（与 preparePackage 一致）；
+//   - module 名取最浅层传入的 go.mod；
+//   - 缺少 go.mod 记为 warning/no_gomod 并保留 __unknown_module__。
 //
-// A bad file is a file-level error/parse_error and does not discard the good
-// files. Output is identical to the CLI for equivalent input after tmpN
-// normalization (cross-file order inside a package follows Go map iteration).
+// 坏文件记为文件级 error/parse_error，不会丢弃好文件。对等价输入，tmpN 归一化后
+// 输出与 CLI 一致（同一 package 内的跨文件顺序遵循 Go map 迭代）。
 func ParseSources(files []SourceFile, rootArg ...string) (jsonBytes []byte, errs []ParseError, err error) {
 	defer recoverBoundary("ParseSources", "<memory>", &jsonBytes, &errs, &err)
 
@@ -231,9 +223,8 @@ func ParseSources(files []SourceFile, rootArg ...string) (jsonBytes []byte, errs
 	}
 	root := commonRoot(files)
 	if len(rootArg) > 0 && rootArg[0] != "" {
-		// Explicit root wins (caller knows the module root, e.g. Engine's
-		// project directory); it must be the same string the CLI would pass to
-		// -rootDir for byte-identical package paths.
+		// 显式 root 优先（调用方知道 module root，例如 Engine 的项目目录）；
+		// 为使 package 路径逐字节一致，它必须与 CLI 传给 -rootDir 的字符串相同。
 		root = rootArg[0]
 	}
 	fset := token.NewFileSet()
@@ -304,10 +295,9 @@ func ParseSources(files []SourceFile, rootArg ...string) (jsonBytes []byte, errs
 	return b, errs, nil
 }
 
-// ParsePackage parses the .go files directly under dir, one file at a time so a
-// bad file is recorded and does not discard the good ones. For a directory with
-// several package names the returned package is chosen by map iteration order;
-// this preserves the original (known, not-to-be-fixed) behavior O1.
+// ParsePackage 逐个解析 dir 下的 .go 文件，使坏文件被记录而不丢弃好文件。
+// 对含多个 package 名的目录，返回的 package 由 map 迭代顺序决定；这保留了原版
+// （已知、本次不修）的 O1 行为。
 func ParsePackage(dir string, fset *token.FileSet) (packageName string, files map[string]*ast.File, errs []ParseError, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -385,8 +375,8 @@ func preparePackage(rootDir string, fset *token.FileSet) (map[string]*ast.Packag
 	return packages, errs, nil
 }
 
-// buildPackage runs the UAST builder. A GetResult failure is a request-level
-// error (never a packageInfo:null product with exit 0).
+// buildPackage 运行 UAST builder。GetResult 失败为请求级 error（绝不产出
+// packageInfo:null 且 exit 0）。
 func buildPackage(moduleName string, packages map[string]*ast.Package, fset *token.FileSet) (*uast.PackagePathInfo, []ParseError, error) {
 	b := uast.NewUASTBuilder(moduleName, packages, fset)
 	b.Build()
@@ -405,8 +395,8 @@ func encodeOutput(out *Output) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// recoverBoundary converts a residual panic at the library boundary into a
-// request-level error, so callers never observe a process crash.
+// recoverBoundary 把库边界处的残留 panic 转成请求级 error，使调用方永远不会
+// 遭遇进程崩溃。
 func recoverBoundary(op, subject string, out *[]byte, errs *[]ParseError, err *error) {
 	if r := recover(); r != nil {
 		*out = nil
@@ -415,7 +405,7 @@ func recoverBoundary(op, subject string, out *[]byte, errs *[]ParseError, err *e
 	}
 }
 
-// findAllGoMod searches for go.mod files under dir (original behavior).
+// findAllGoMod 在 dir 下搜索 go.mod 文件（保持原版行为）。
 func findAllGoMod(dir string) ([]string, error) {
 	if strings.Contains(dir, "/vendor") {
 		return nil, fmt.Errorf("find vendor")
@@ -448,7 +438,7 @@ func findAllGoMod(dir string) ([]string, error) {
 	return nil, fmt.Errorf("not found go.mod")
 }
 
-// readModuleName reads the module name from the go.mod file (original behavior).
+// readModuleName 从 go.mod 文件读取 module 名（保持原版行为）。
 func readModuleName(modFilePath string) (string, error) {
 	content, err := os.ReadFile(modFilePath)
 	if err != nil {
@@ -457,8 +447,8 @@ func readModuleName(modFilePath string) (string, error) {
 	return moduleNameFromContent(content, modFilePath)
 }
 
-// moduleNameFromContent is the filesystem-free half of readModuleName, used by
-// the in-memory ParseSources path.
+// moduleNameFromContent 是 readModuleName 中去掉文件系统的部分，供内存态
+// ParseSources 路径使用。
 func moduleNameFromContent(content []byte, source string) (string, error) {
 	for _, line := range strings.Split(string(content), "\n") {
 		if strings.HasPrefix(line, "module") {
@@ -471,13 +461,12 @@ func moduleNameFromContent(content []byte, source string) (string, error) {
 	return "", fmt.Errorf("module directive not found in %s", source)
 }
 
-// pathDepth counts path separators, used to pick the shallowest go.mod.
+// pathDepth 统计路径分隔符数量，用于选取最浅层的 go.mod。
 func pathDepth(p string) int {
 	return strings.Count(filepath.ToSlash(filepath.Clean(p)), "/")
 }
 
-// commonRoot returns the common ancestor directory of the file names, which
-// plays the role of the CLI's -rootDir.
+// commonRoot 返回各文件名的共同祖先目录，扮演 CLI `-rootDir` 的角色。
 func commonRoot(files []SourceFile) string {
 	root := filepath.Dir(files[0].Name)
 	for _, f := range files[1:] {
@@ -512,15 +501,14 @@ func isParentRef(rel string) bool {
 	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// preparePackagesFromSources mirrors preparePackage, but over in-memory files.
-// It reproduces the CLI's filepath.Walk pruning semantics exactly:
-//   - a directory whose base starts with "." is pruned together with its whole
-//     subtree only when it directly contains a .go file (the CLI checks
-//     ContainsGoFiles before its dot check, so a dot directory without direct
-//     .go files is descended into and its descendants are parsed);
-//   - paths containing /vendor are excluded;
-//   - each .go file is parsed individually (a bad file is recorded, not fatal);
-//   - one package name per directory is chosen via map iteration (O1 preserved).
+// preparePackagesFromSources 复刻 preparePackage，但基于内存文件。它精确复现
+// CLI 的 filepath.Walk 剪枝语义：
+//   - 目录 basename 以 "." 开头时，仅当该目录**直接包含 .go 文件**才连同整棵
+//     子树一起剪掉（CLI 先判 ContainsGoFiles 再判 dot，因此没有直接 .go 文件的
+//     dot 目录会被下钻，其子孙仍会解析）；
+//   - 含 /vendor 的路径被排除；
+//   - 每个 .go 文件单独解析（坏文件被记录，不致命）；
+//   - 每个目录通过 map 迭代选出一个 package 名（保留 O1）。
 func preparePackagesFromSources(root string, files []SourceFile, fset *token.FileSet) (map[string]*ast.Package, []ParseError) {
 	packages := make(map[string]*ast.Package)
 	var errs []ParseError
@@ -580,10 +568,9 @@ func preparePackagesFromSources(root string, files []SourceFile, fset *token.Fil
 	return packages, errs
 }
 
-// prunedByDotDir reports whether dir sits inside a subtree the CLI would prune
-// with filepath.SkipDir. The CLI only returns SkipDir for a dot directory that
-// directly contains a .go file; a dot directory with no direct .go files is
-// descended into (its descendants may still be parsed).
+// prunedByDotDir 报告 dir 是否位于 CLI 会用 filepath.SkipDir 剪掉的子树内。
+// CLI 只对**直接包含 .go 文件**的 dot 目录返回 SkipDir；没有直接 .go 文件的
+// dot 目录会被下钻（其子孙仍可能被解析）。
 func prunedByDotDir(root, dir string, dirHasGo map[string]bool) bool {
 	for cur := dir; ; {
 		base := filepath.Base(cur)
@@ -601,7 +588,7 @@ func prunedByDotDir(root, dir string, dirHasGo map[string]bool) bool {
 	}
 }
 
-// containsGoFiles reports whether dir directly contains a .go file.
+// containsGoFiles 报告 dir 是否直接包含 .go 文件。
 func containsGoFiles(dir string) bool {
 	list, err := os.ReadDir(dir)
 	if err != nil {

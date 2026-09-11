@@ -1,8 +1,8 @@
 //go:build !(js && wasm)
 
-// Package main is an empty stub on non-js/wasm platforms so that
-// `go vet ./...` and `go test ./...` stay green on linux/macOS. The real wasm
-// entry point lives in main_js_wasm.go behind the `js && wasm` build tag.
+// Package main 在非 js/wasm 平台上是空 stub，使 `go vet ./...` 与
+// `go test ./...` 在 linux/macOS 上保持全绿。真正的 wasm 入口位于
+// main_js_wasm.go，由 `js && wasm` build tag 保护。
 package main
 
 func main() {}

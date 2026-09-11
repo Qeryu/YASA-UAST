@@ -63,7 +63,7 @@ test('parseProject explicit root overrides the common-ancestor heuristic', async
   fs.writeFileSync(path.join(mod, 'sub', 'b.go'), bGo)
 
   const out = path.join(base, 'out.json')
-  runCLI([`-rootDir=${base}`, `-output=${out}`]) // -rootDir = parent, so paths are /mod, /mod/sub
+  runCLI([`-rootDir=${base}`, `-output=${out}`]) // -rootDir = 父目录，因此路径为 /mod、/mod/sub
   const cli = fs.readFileSync(out, 'utf8')
 
   const obj = parser.parseProject(

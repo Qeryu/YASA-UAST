@@ -29,6 +29,6 @@ test('constructor accepts (and ignores) opts; parse() aliases parseSource', asyn
   const viaSource = parser.parseSource('via-parse.go', code)
   assert.deepEqual(viaParse, viaSource, 'parse() must alias parseSource()')
 
-  // Omitting opts falls back to '' as sourcefile without throwing.
+  // 省略 opts 时 sourcefile 回退为 ''，且不抛错。
   assert.ok(parser.parse(code).packageInfo)
 })

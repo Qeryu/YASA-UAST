@@ -9,7 +9,7 @@ const ROOT = path.join(__dirname, '..')
 
 let cachedCLI = null
 
-/** Build the native CLI once (used as the parity oracle) into a temp dir. */
+/** 构建一次 native CLI（作为 parity oracle）到临时目录。 */
 function buildCLI() {
   if (cachedCLI) return cachedCLI
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uast4go-cli-'))
@@ -27,7 +27,7 @@ function runCLI(args, cwd = ROOT) {
   execFileSync(buildCLI(), args, { cwd, stdio: 'pipe' })
 }
 
-/** Normalize the builder's per-package tmpN counter for cross-run comparison. */
+/** 归一化 builder 的 per-package tmpN 计数器，便于跨运行比较。 */
 function normalizeTmpN(s) {
   return s.replace(/tmp[0-9]+/g, 'tmpX')
 }

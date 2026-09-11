@@ -1,23 +1,20 @@
 //go:build js && wasm
 
-// Package main implements the resident (long-lived) wasm entry point used by
-// @ant-yasa/uast-parser-go. P3 uses syscall/js; //go:wasmexport is the P5
-// transport swap. It does NOT go through the CLI main / flag.Parse.
+// Package main 是 @ant-yasa/uast-parser-go 使用的常驻（长生命周期）wasm 入口。
+// P3 使用 syscall/js；//go:wasmexport 是 P5 的运输层切换。它不经过 CLI 的
+// main / flag.Parse。
 //
-// Protocol (synchronous, JSON string in / JSON string out). The envelope is
-// internal to this package/loader pair; "v" is the protocol version (1) and
-// exists so the TS loader can reject a shape mismatch instead of silently
-// mis-decoding.
+// 协议（同步，JSON 字符串进 / JSON 字符串出）。该 envelope 为本包与 loader 的
+// 内部约定；"v" 是协议版本（1），使 TS loader 能拒绝形状不匹配而不是静默误解析。
 //
 //	request  {"v":1,"mode":"single","name":"...","content":"..."}
 //	         {"v":1,"mode":"project","root":"...","files":[{"name":"...","content":"..."}]}
-//	response {"v":1,"ok":true,"data":"<CLI JSON string, incl. trailing newline>","errors":[...]}
+//	response {"v":1,"ok":true,"data":"<与 CLI 等价的 JSON 字符串，含末尾换行>","errors":[...]}
 //	         {"v":1,"ok":false,"errors":[...]}
 //
-// Single-file error-severity errors yield ok=false (no product); project mode
-// yields ok=true with data plus errors (partial failure), matching the CLI.
-// The handler never panics/exits: api.* already recovers and handle() adds a
-// protocol-boundary recover.
+// 单文件的 error 级错误返回 ok=false（无产物）；项目模式返回 ok=true 并带 data
+// 和 errors（局部失败），与 CLI 一致。handler 绝不 panic/exit：api.* 已 recover，
+// handle() 再加一层协议边界 recover。
 package main
 
 import (
@@ -54,8 +51,8 @@ type parseResponse struct {
 func main() {
 	js.Global().Set("__uastGoParse", js.FuncOf(handle))
 
-	// Resident: keep the Go runtime (and the registered callback) alive while
-	// leaving the JS event loop free for synchronous calls.
+	// 常驻：保持 Go runtime（及已注册的回调）存活，同时让 JS 事件循环空出来
+	// 供同步调用使用。
 	select {}
 }
 
@@ -64,18 +61,18 @@ func handle(this js.Value, args []js.Value) (result any) {
 		if r := recover(); r != nil {
 			result = marshal(parseResponse{
 				OK:     false,
-				Errors: protocolError(fmt.Sprintf("recovered panic: %v", r)),
+				Errors: protocolError(fmt.Sprintf("recover 捕获到 panic: %v", r)),
 			})
 		}
 	}()
 
 	if len(args) < 1 || args[0].Type() != js.TypeString {
-		return marshal(parseResponse{OK: false, Errors: protocolError("expected a JSON request string")})
+		return marshal(parseResponse{OK: false, Errors: protocolError("期望一个 JSON 请求字符串")})
 	}
 
 	var req parseRequest
 	if err := json.Unmarshal([]byte(args[0].String()), &req); err != nil {
-		return marshal(parseResponse{OK: false, Errors: protocolError("invalid request JSON: " + err.Error())})
+		return marshal(parseResponse{OK: false, Errors: protocolError("请求 JSON 非法: " + err.Error())})
 	}
 
 	switch req.Mode {
@@ -85,7 +82,7 @@ func handle(this js.Value, args []js.Value) (result any) {
 			return marshal(failure(errs, err))
 		}
 		if api.HasErrors(errs) {
-			// Single-file: error-severity means no product (CLI exit-1 semantics).
+			// 单文件：error 级表示无产物（CLI exit-1 语义）。
 			return marshal(parseResponse{V: protocolVersion, OK: false, Errors: errs})
 		}
 		return marshal(parseResponse{V: protocolVersion, OK: true, Data: string(data), Errors: errs})
@@ -100,7 +97,7 @@ func handle(this js.Value, args []js.Value) (result any) {
 		}
 		return marshal(parseResponse{V: protocolVersion, OK: true, Data: string(data), Errors: errs})
 	default:
-		return marshal(parseResponse{V: protocolVersion, OK: false, Errors: protocolError("unknown mode: " + req.Mode)})
+		return marshal(parseResponse{V: protocolVersion, OK: false, Errors: protocolError("未知 mode: " + req.Mode)})
 	}
 }
 
@@ -126,7 +123,7 @@ func marshal(resp parseResponse) string {
 	resp.V = protocolVersion
 	b, err := json.Marshal(resp)
 	if err != nil {
-		return `{"v":1,"ok":false,"errors":[{"message":"failed to marshal response","severity":"error","kind":"parse_error"}]}`
+		return `{"v":1,"ok":false,"errors":[{"message":"响应序列化失败","severity":"error","kind":"parse_error"}]}`
 	}
 	return string(b)
 }

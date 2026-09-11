@@ -15,14 +15,14 @@ test('bad single source throws without crashing; instance stays usable', async (
 
   assert.throws(
     () => parser.parseSource('bad.go', 'package p\n\nfunc broken( {\n'),
-    /uast parse failed/
+    /uast 解析失败/
   )
   assert.ok(
     parser.lastErrors.some((e) => e.severity === 'error' && e.kind === 'parse_error'),
     `expected error/parse_error in lastErrors, got ${JSON.stringify(parser.lastErrors)}`
   )
 
-  // The resident instance must survive a failed parse.
+  // 常驻实例必须在一次解析失败后依然可用。
   const ok = parser.parseSource('examples/imports.go', readExample('examples/imports.go'))
   assert.ok(ok && ok.packageInfo, 'instance must remain usable after a failed parse')
 })

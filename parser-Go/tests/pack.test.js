@@ -22,8 +22,7 @@ test('package.json wires build/build:wasm/prepack and stays runtime-dependency f
 })
 
 test('npm pack --dry-run lists dist/ and dist-wasm/ assets', () => {
-  // Ensure the wasm assets exist (verification runs build:wasm before test, but
-  // be self-sufficient if the test is run alone).
+  // 确保 wasm 资产存在（验证流程会在 test 前跑 build:wasm；单独运行时也需自足）。
   if (!fs.existsSync(path.join(ROOT, 'dist-wasm', 'uast4go.wasm'))) {
     execFileSync('npm', ['run', 'build:wasm'], { cwd: ROOT, stdio: 'pipe' })
   }
