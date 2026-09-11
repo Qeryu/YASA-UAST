@@ -5,7 +5,6 @@ import (
 	"github.com/creasty/defaults"
 	"go/ast"
 	"go/token"
-	"os"
 	"reflect"
 	"strings"
 	"uast4go/utils"
@@ -50,6 +49,10 @@ type Builder struct {
 	result      *PackagePathInfo
 	parent      *ast.Node
 	done        bool //
+	// errs collects file-level (recoverable) errors; currentFile is the file
+	// being processed and is used as ParseError.File.
+	errs        []ParseError
+	currentFile string
 }
 
 func NewUASTBuilder(moduleName string, packages map[string]*ast.Package, fset *token.FileSet) *Builder {
@@ -60,6 +63,7 @@ func NewUASTBuilder(moduleName string, packages map[string]*ast.Package, fset *t
 }
 
 func (u *Builder) Build() {
+	u.errs = nil
 	for filePath, pkg := range u.packages {
 		//fmt.Printf("Package path: %s, Package name: %s, Files: %v\n", filePath, pkg.Name, pkg.Files)
 		u.filePath = filePath
@@ -70,15 +74,26 @@ func (u *Builder) Build() {
 }
 
 func (u *Builder) preprocessTypeDecl() {
-	for _, file := range u.pkg.Files {
+	for filePath, file := range u.pkg.Files {
+		u.currentFile = filePath
 		for _, decl := range file.Decls {
 			if genDecl, ok := decl.(*ast.GenDecl); ok {
 				switch genDecl.Tok {
 				case token.TYPE:
 					classDefinitions := u.visitGenDecl(genDecl)
 					for i, cd := range classDefinitions {
-						ts := genDecl.Specs[i].(*ast.TypeSpec)
-						cDef := cd.(*ClassDefinition)
+						if i >= len(genDecl.Specs) {
+							break
+						}
+						ts, ok := genDecl.Specs[i].(*ast.TypeSpec)
+						if !ok {
+							continue
+						}
+						cDef, ok := cd.(*ClassDefinition)
+						if !ok {
+							u.recordError(fmt.Sprintf("type declaration %T is not a ClassDefinition", cd))
+							continue
+						}
 						defId := cDef.Id.Name
 						u.type2Class[ts] = cDef
 						u.typeDecls[defId] = ts
@@ -87,7 +102,13 @@ func (u *Builder) preprocessTypeDecl() {
 				case token.IMPORT:
 					importStmts := u.visitGenDecl(genDecl)
 					for i, stmt := range importStmts {
-						importSpec := genDecl.Specs[i].(*ast.ImportSpec)
+						if i >= len(genDecl.Specs) {
+							break
+						}
+						importSpec, ok := genDecl.Specs[i].(*ast.ImportSpec)
+						if !ok {
+							continue
+						}
 						u.import2Stmt[importSpec] = stmt
 					}
 					break
@@ -99,6 +120,7 @@ func (u *Builder) preprocessTypeDecl() {
 
 func (u *Builder) build() {
 	for filePath, file := range u.pkg.Files {
+		u.currentFile = filePath
 		var compileUnit = CompileUnit{
 			Body:            make([]Instruction, 0),
 			Language:        LANGUAGE,
@@ -125,7 +147,9 @@ func (u *Builder) build() {
 				}
 				break
 			default:
-				panic("unreachable")
+				// ast.File.Decls is only GenDecl/FuncDecl; keep going instead of
+				// terminating the process if an unexpected declaration appears.
+				u.recordError(fmt.Sprintf("unsupported declaration %T", decl))
 			}
 		}
 		u.packPos(&compileUnit, file)
@@ -185,8 +209,9 @@ func (u *Builder) visit(node ast.Node) UNode {
 	t := reflect.TypeOf(node)
 	funcName := "Visit" + getLastPartAfterDot(t.String())
 	if funcName == "Visit" {
-		fmt.Printf("node type %v not found\n", node)
-		os.Exit(-1)
+		// 无对应 Visit 方法：记录文件级错误并降级为 Noop，继续构建。
+		u.recordError(fmt.Sprintf("node type %v not found", node))
+		return &Noop{}
 	}
 
 	// 获取类型实例的反射值
@@ -195,8 +220,9 @@ func (u *Builder) visit(node ast.Node) UNode {
 	// 通过反射查找实例的方法
 	methodVal := builderVal.MethodByName(funcName)
 	if !methodVal.IsValid() {
-		fmt.Printf("Method %s not found\n", funcName)
-		os.Exit(-1)
+		// 无对应 Visit 方法：记录文件级错误并降级为 Noop，继续构建。
+		u.recordError(fmt.Sprintf("Method %s not found", funcName))
+		return &Noop{}
 	}
 
 	// 准备方法的参数
@@ -258,11 +284,13 @@ func (u *Builder) convertToLineColumn(node ast.Node) *Location {
 	return convertToLineColumn(node, u.fset)
 }
 
-func (u *Builder) GetResult() *PackagePathInfo {
+// GetResult returns the built package path info. It returns an error (instead
+// of panicking) when Build has not completed yet.
+func (u *Builder) GetResult() (*PackagePathInfo, error) {
 	if !u.done {
-		panic("It should [Build] result before get it")
+		return nil, fmt.Errorf("GetResult called before Build")
 	}
-	return u.result
+	return u.result, nil
 }
 
 // 如果内部有任何的ast子节点，并且子节点没有被设置loc，则将loc默认设置为当前父节点的loc

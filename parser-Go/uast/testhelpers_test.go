@@ -30,7 +30,11 @@ func buildSource(t *testing.T, name, src string) *PackagePathInfo {
 
 	b := NewUASTBuilder("__single_module__", packages, fset)
 	b.Build()
-	return b.GetResult()
+	res, err := b.GetResult()
+	if err != nil {
+		t.Fatalf("GetResult after Build: %v", err)
+	}
+	return res
 }
 
 // fileNode returns the single NodeInfo produced for the synthetic package.

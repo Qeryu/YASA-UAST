@@ -654,26 +654,33 @@ func (u *Builder) VisitAssignStmt(node *ast.AssignStmt) UNode {
 						if compositeLit, isComLit := assignment.Rhs[0].(*ast.CompositeLit); isComLit {
 							varType = u.visit(compositeLit.Type)
 							if arrayType, isArrTy := varType.(*ArrayType); isArrTy {
+								// 安全降级：slice 边界不是可解析的十进制整数
+								// （如下划线/十六进制字面量）时不设置 size，而不是 panic。
 								var highVal, lowVal int
+								parseOK := true
 								if high, isBasicLit := sliceExpr.High.(*ast.BasicLit); isBasicLit {
-									var err error
-									highVal, err = strconv.Atoi(high.Value)
+									v, err := strconv.Atoi(high.Value)
 									if err != nil {
-										panic(err)
+										parseOK = false
+									} else {
+										highVal = v
 									}
 								}
 								if low, isBasicLit := sliceExpr.Low.(*ast.BasicLit); isBasicLit {
-									var err error
-									lowVal, err = strconv.Atoi(low.Value)
+									v, err := strconv.Atoi(low.Value)
 									if err != nil {
-										panic(err)
+										parseOK = false
+									} else {
+										lowVal = v
 									}
 								}
-								size := highVal - lowVal
-								arrayType.Size = &Literal{
-									Type:        "Literal",
-									LiteralType: "INT",
-									Value:       strconv.Itoa(size),
+								if parseOK {
+									size := highVal - lowVal
+									arrayType.Size = &Literal{
+										Type:        "Literal",
+										LiteralType: "INT",
+										Value:       strconv.Itoa(size),
+									}
 								}
 							}
 						}

@@ -10,21 +10,19 @@ import (
 	"testing"
 )
 
-// Batch B — error-path target contracts for the P2 error-model refactor.
+// Batch B — error-path contracts (now active, no longer skipped).
 //
-// These tests are skipped in P1, but the assertion bodies are *falsifiable*:
-// removing a t.Skip makes the test fail against the current implementation,
-// because every assertion describes the P2 target (graceful failure, partial
-// success, structured reporting) rather than today's panic/os.Exit/silent-empty
-// behavior. They drive a freshly built CLI binary in a subprocess so the raw
-// process semantics (exit code, stderr) can be observed; once P2 changes the
-// function signatures these can be rewritten as in-process assertions.
+// They drive a freshly built CLI binary in a subprocess so the raw process
+// semantics (exit code, stderr) can be observed. Contract:
+//
+//   - single-file parse failure -> non-zero exit, no panic, stderr names the file;
+//   - project with a bad file    -> good files still emitted, failure reported;
+//   - request-level failure      -> non-zero exit;
+//   - missing go.mod             -> surfaced (stderr), not silently swallowed.
 //
 // Not covered here because the symbol lives in package uast (and cannot be
-// reached from package main):
-//   - GetResult before Build returning an error instead of panicking.
-// That case is covered by uast/repro_test.go. The os.Exit dispatch path for an
-// unregistered ast node is also owned by uast/repro_test.go.
+// reached from package main): GetResult-before-Build and the unregistered-node
+// dispatch path. Both are owned by uast/repro_test.go.
 
 var (
 	cliOnce sync.Once
@@ -94,10 +92,7 @@ func mustReadFile(t *testing.T, path string) string {
 
 // TestBadSyntaxSingleFile: a syntactically invalid file must fail gracefully:
 // non-zero exit, no panic, and stderr must identify the offending file.
-// Current behavior: panic (exit 2, "panic:" in stderr) => red when unskipped.
 func TestBadSyntaxSingleFile(t *testing.T) {
-	t.Skip("P2: error-model refactor — 去掉本行后本测试应失败（当前 panic, exit 2）")
-
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad.go")
 	mustWriteFile(t, bad, "package p\n\nfunc broken( {\n")
@@ -118,11 +113,7 @@ func TestBadSyntaxSingleFile(t *testing.T) {
 
 // TestProjectPartialFailure: D11 semantics — one bad file in a project must not
 // discard the good files; the good ones still appear and the failure is recorded.
-// Current behavior: parser.ParseDir errors and the whole package is dropped
-// (empty output) => red when unskipped.
 func TestProjectPartialFailure(t *testing.T) {
-	t.Skip("P2/D11: error-model refactor — 去掉本行后本测试应失败（当前 ParseDir 失败会丢弃整个包）")
-
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "go.mod"), "module fixture\n\ngo 1.22\n")
 	mustWriteFile(t, filepath.Join(dir, "good1.go"), "package fixture\n\nfunc Good1() int { return 1 }\n")
@@ -147,10 +138,7 @@ func TestProjectPartialFailure(t *testing.T) {
 
 // TestRootDirMissing: a missing rootDir is a request-level failure and must
 // return a non-zero status, not silently write an empty result.
-// Current behavior: exit 0 => red when unskipped.
 func TestRootDirMissing(t *testing.T) {
-	t.Skip("P2: error-model refactor — 去掉本行后本测试应失败（当前 exit 0 且写空结果）")
-
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "does-not-exist")
 	out := filepath.Join(dir, "out.json")
@@ -165,10 +153,7 @@ func TestRootDirMissing(t *testing.T) {
 }
 
 // TestNoGoFilesDir: a directory with no .go files is a request-level failure.
-// Current behavior: exit 0 with an empty result => red when unskipped.
 func TestNoGoFilesDir(t *testing.T) {
-	t.Skip("P2: error-model refactor — 去掉本行后本测试应失败（当前 exit 0 且写空结果）")
-
 	dir := t.TempDir()
 	out := filepath.Join(dir, "out.json")
 
@@ -179,13 +164,9 @@ func TestNoGoFilesDir(t *testing.T) {
 }
 
 // TestNoGoModReported: a project without go.mod must not be silently accepted.
-// The assertion deliberately does not prescribe P2's exact shape (warning vs
+// The assertion deliberately does not prescribe the exact shape (warning vs
 // error exit) — only that the condition is surfaced.
-// Current behavior: exit 0, empty stderr, "__unknown_module__" in output =>
-// red when unskipped.
 func TestNoGoModReported(t *testing.T) {
-	t.Skip("P2: error-model refactor — 去掉本行后本测试应失败（当前静默 __unknown_module__，无上报）")
-
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "a.go"), "package p\n\nfunc Ok() {}\n")
 	out := filepath.Join(dir, "out.json")

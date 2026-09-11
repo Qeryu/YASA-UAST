@@ -3,18 +3,15 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
-	"uast4go/uast"
+
+	"uast4go/api"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -26,71 +23,20 @@ func testdataDir(t *testing.T) string {
 }
 
 func TestCreatePackage(t *testing.T) {
-	// Use repo examples dir (has go.mod) so test runs on any machine (Mac/Linux/CI)
+	// Use repo examples dir (has go.mod) so test runs on any machine (Mac/Linux/CI).
+	// This legacy test only prints the parsed project; correctness is asserted by
+	// TestBuildOutput (golden corpus) and the api/uast package tests.
 	rootDir := filepath.Join(testdataDir(t), "examples")
 
-	// Read the module name from go.mod
-	moduleName, err := readModuleName(filepath.Join(rootDir, "go.mod"))
+	jsonBytes, errs, err := api.ParseProject(rootDir)
 	if err != nil {
-		panic(err)
+		t.Fatalf("ParseProject(%s): %v", rootDir, err)
 	}
-
-	// FileSet needed for parsing
-	fset := token.NewFileSet()
-
-	// Map to store package path to package
-	packages := make(map[string]*ast.Package)
-
-	// Walk the directory tree
-	err = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// We're only interested in directories
-		if !info.IsDir() {
-			return nil
-		}
-
-		// Skip the .git folder and any other dot folders
-		if strings.HasPrefix(info.Name(), ".") {
-			return filepath.SkipDir
-		}
-
-		// Parse the package in the directory
-		packageName, files, err := parsePackage(path, fset)
-		if err != nil {
-			return err
-		}
-
-		// Construct the full package import path
-		relativePath, _ := filepath.Rel(rootDir, path)
-		packagePath := filepath.Join(moduleName, relativePath)
-
-		// Store the package in the map
-		packages[packagePath] = &ast.Package{
-			Name:  packageName,
-			Files: files,
-		}
-
-		return nil
-	})
-	if err != nil {
-		panic(err)
+	for _, e := range errs {
+		t.Logf("file-level error: %s", e.Error())
 	}
-
-	b := uast.NewUASTBuilder("test", packages, fset)
-	b.Build()
-	files := b.GetResult()
-
-	jsonBytes, err := json.MarshalIndent(files, "", "  ")
-	if err != nil {
-		log.Fatalf("JSON marshaling failed: %s", err)
-	}
-
 	// jsonBytes是一个字节切片，可以转为字符串输出
-	jsonString := string(jsonBytes)
-	fmt.Println(jsonString)
+	fmt.Println(string(jsonBytes))
 }
 
 type AssignCopy struct {
@@ -113,37 +59,15 @@ func buidUAST(path string) string {
 			displayPath = normalizedAbsPath[i:]
 		}
 	}
-	content, err := os.ReadFile(path)
+	jsonBytes, errs, err := api.ParseSingleFile(displayPath)
 	if err != nil {
 		panic(err)
 	}
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, displayPath, content, parser.DeclarationErrors)
-	if err != nil {
-		panic(err)
-	}
-	pkg := &ast.Package{
-		Name:    "__single__",
-		Scope:   nil,
-		Imports: nil,
-		Files:   make(map[string]*ast.File),
-	}
-	pkg.Files[displayPath] = f
-	packages := make(map[string]*ast.Package)
-	packages["__single__"] = pkg
-
-	packageInfo := buildPackage("__single_module__", packages, fset)
-	output := &Output{
-		PackageInfo: packageInfo,
-		ModuleName:  "__single_module__",
-	}
-	jsonBytes, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		log.Fatalf("JSON marshaling failed: %s", err)
+	if len(errs) != 0 {
+		panic(fmt.Sprintf("parse %s: %v", displayPath, errs))
 	}
 	// jsonBytes是一个字节切片，可以转为字符串输出
-	jsonString := string(jsonBytes)
-	return jsonString
+	return string(jsonBytes)
 }
 
 func processGoFiles(dir string) error {

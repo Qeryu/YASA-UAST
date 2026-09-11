@@ -7,14 +7,16 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+
+	"uast4go/api"
 )
 
 // TestParsePackageRandomSelection documents the known defect from
-// docs/uastgo-wasm-plan.md §5.4 (and TODO §8 O1): parsePackage picks a package
+// docs/uastgo-wasm-plan.md §5.4 (and TODO §8 O1): ParsePackage picks a package
 // from a Go map iteration, so a directory containing both `p` and `p_test` may
-// randomly drop the main package. Decision for P1: keep the original behavior,
-// record the defect and skip. Remove the skip once deterministic selection
-// lands; the assertion body is the regression guard.
+// randomly drop the main package. Decision for P1/P2a: keep the original
+// behavior, record the defect and skip. Remove the skip once deterministic
+// selection lands; the assertion body is the regression guard.
 func TestParsePackageRandomSelection(t *testing.T) {
 	t.Skip("known defect: main.go:27-29 随机选包；见 docs/uastgo-wasm-plan.md §5.4；本次不修")
 
@@ -26,9 +28,9 @@ func TestParsePackageRandomSelection(t *testing.T) {
 	var firstPkg string
 	var firstFiles []string
 	for i := 0; i < 20; i++ {
-		pkgName, files, err := parsePackage(dir, fset)
+		pkgName, files, _, err := api.ParsePackage(dir, fset)
 		if err != nil {
-			t.Fatalf("iteration %d: parsePackage: %v", i, err)
+			t.Fatalf("iteration %d: ParsePackage: %v", i, err)
 		}
 		names := make([]string, 0, len(files))
 		for name := range files {
