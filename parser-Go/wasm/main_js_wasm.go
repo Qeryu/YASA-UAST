@@ -1,11 +1,14 @@
 //go:build js && wasm
 
 // Package main 是 @ant-yasa/uast-parser-go 使用的常驻（长生命周期）wasm 入口。
-// P3 使用 syscall/js；//go:wasmexport 是 P5 的运输层切换。它不经过 CLI 的
+// P5 使用 //go:wasmexport 导出（此前的 syscall/js 运输层已移除）。它不经过 CLI 的
 // main / flag.Parse。
 //
-// 协议（同步，JSON 字符串进 / JSON 字符串出）。该 envelope 为本包与 loader 的
-// 内部约定；"v" 是协议版本（1），使 TS loader 能拒绝形状不匹配而不是静默误解析。
+// 协议（同步；宿主写线性内存 + JSON envelope，envelope 内容与 P3 一致）：
+//
+//	宿主: ptr = uast_alloc(len); 将请求字节写入 wasm 线性内存 [ptr, ptr+len)
+//	宿主: packed = uast_parse(ptr, len) // int64 = (resultPtr<<32) | resultLen
+//	宿主: 从线性内存 [resultPtr, resultPtr+resultLen) 读回响应 JSON
 //
 //	request  {"v":1,"mode":"single","name":"...","content":"..."}
 //	         {"v":1,"mode":"project","root":"...","files":[{"name":"...","content":"..."}]}
@@ -13,14 +16,15 @@
 //	         {"v":1,"ok":false,"errors":[...]}
 //
 // 单文件的 error 级错误返回 ok=false（无产物）；项目模式返回 ok=true 并带 data
-// 和 errors（局部失败），与 CLI 一致。handler 绝不 panic/exit：api.* 已 recover，
-// handle() 再加一层协议边界 recover。
+// 和 errors（局部失败），与 CLI 一致。导出函数绝不 panic/exit：parseExport 内
+// recover，api.* 也各自 recover。main 阻塞在 select{}，保持 runtime 存活，宿主方可
+// 在 go.run() 之后同步调用导出。
 package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"syscall/js"
+	"unsafe"
 
 	"uast4go/api"
 )
@@ -48,44 +52,70 @@ type parseResponse struct {
 	Errors []api.ParseError `json:"errors,omitempty"`
 }
 
-func main() {
-	js.Global().Set("__uastGoParse", js.FuncOf(handle))
+var (
+	// requestBuf 保持宿主写入的请求字节存活到 uast_parse 读取。
+	requestBuf []byte
+	// requestPtr 是 uast_alloc 返回、宿主写入所用的指针。
+	requestPtr int32
+	// resultBuf 保持 uast_parse 结果存活到宿主读回。
+	resultBuf []byte
+)
 
-	// 常驻：保持 Go runtime（及已注册的回调）存活，同时让 JS 事件循环空出来
-	// 供同步调用使用。
-	select {}
+// uast_alloc 在 Go 堆上分配 size 字节并返回其在线性内存中的指针（0 表示空）。
+// 宿主随后把请求字节写入该区间，再调用 uast_parse。
+//
+//go:wasmexport uast_alloc
+func uastAlloc(size int32) int32 {
+	if size <= 0 {
+		requestBuf, requestPtr = nil, 0
+		return 0
+	}
+	requestBuf = make([]byte, int(size))
+	requestPtr = int32(uintptr(unsafe.Pointer(&requestBuf[0])))
+	return requestPtr
 }
 
-func handle(this js.Value, args []js.Value) (result any) {
+// uast_parse 解析宿主写入的请求并返回打包结果 (resultPtr<<32)|resultLen。
+// 参数 ptr 必须与 uast_alloc 返回的指针一致。
+//
+//go:wasmexport uast_parse
+func uastParse(ptr int32, length int32) int64 {
+	return parseExport(ptr, length)
+}
+
+func parseExport(ptr, length int32) (packed int64) {
 	defer func() {
 		if r := recover(); r != nil {
-			result = marshal(parseResponse{
+			packed = storeResult(parseResponse{
 				OK:     false,
 				Errors: protocolError(fmt.Sprintf("recover 捕获到 panic: %v", r)),
 			})
 		}
 	}()
 
-	if len(args) < 1 || args[0].Type() != js.TypeString {
-		return marshal(parseResponse{OK: false, Errors: protocolError("期望一个 JSON 请求字符串")})
+	if length < 0 || int(length) > len(requestBuf) || (length > 0 && ptr != requestPtr) {
+		return storeResult(parseResponse{OK: false, Errors: protocolError("请求缓冲区不匹配")})
 	}
 
 	var req parseRequest
-	if err := json.Unmarshal([]byte(args[0].String()), &req); err != nil {
-		return marshal(parseResponse{OK: false, Errors: protocolError("请求 JSON 非法: " + err.Error())})
+	if err := json.Unmarshal(requestBuf[:length], &req); err != nil {
+		return storeResult(parseResponse{OK: false, Errors: protocolError("请求 JSON 非法: " + err.Error())})
 	}
+	return storeResult(dispatch(req))
+}
 
+func dispatch(req parseRequest) parseResponse {
 	switch req.Mode {
 	case "single":
 		data, errs, err := api.ParseSource(req.Name, []byte(req.Content))
 		if err != nil {
-			return marshal(failure(errs, err))
+			return failure(errs, err)
 		}
 		if api.HasErrors(errs) {
 			// 单文件：error 级表示无产物（CLI exit-1 语义）。
-			return marshal(parseResponse{V: protocolVersion, OK: false, Errors: errs})
+			return parseResponse{OK: false, Errors: errs}
 		}
-		return marshal(parseResponse{V: protocolVersion, OK: true, Data: string(data), Errors: errs})
+		return parseResponse{OK: true, Data: string(data), Errors: errs}
 	case "project":
 		files := make([]api.SourceFile, 0, len(req.Files))
 		for _, f := range req.Files {
@@ -93,12 +123,27 @@ func handle(this js.Value, args []js.Value) (result any) {
 		}
 		data, errs, err := api.ParseSources(files, req.Root)
 		if err != nil {
-			return marshal(failure(errs, err))
+			return failure(errs, err)
 		}
-		return marshal(parseResponse{V: protocolVersion, OK: true, Data: string(data), Errors: errs})
+		return parseResponse{OK: true, Data: string(data), Errors: errs}
 	default:
-		return marshal(parseResponse{V: protocolVersion, OK: false, Errors: protocolError("未知 mode: " + req.Mode)})
+		return parseResponse{OK: false, Errors: protocolError("未知 mode: " + req.Mode)}
 	}
+}
+
+// storeResult 序列化响应、保活结果缓冲并打包返回 (ptr<<32)|len。
+func storeResult(resp parseResponse) int64 {
+	resp.V = protocolVersion
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		raw = []byte(`{"v":1,"ok":false,"errors":[{"message":"响应序列化失败","severity":"error","kind":"parse_error"}]}`)
+	}
+	resultBuf = raw
+	if len(raw) == 0 {
+		return 0
+	}
+	p := uint64(uintptr(unsafe.Pointer(&resultBuf[0])))
+	return int64(p<<32 | uint64(uint32(len(raw))))
 }
 
 func failure(errs []api.ParseError, err error) parseResponse {
@@ -108,7 +153,7 @@ func failure(errs []api.ParseError, err error) parseResponse {
 		Severity: api.SeverityError,
 		Kind:     api.KindParseError,
 	})
-	return parseResponse{V: protocolVersion, OK: false, Errors: out}
+	return parseResponse{OK: false, Errors: out}
 }
 
 func protocolError(message string) []api.ParseError {
@@ -119,11 +164,7 @@ func protocolError(message string) []api.ParseError {
 	}}
 }
 
-func marshal(resp parseResponse) string {
-	resp.V = protocolVersion
-	b, err := json.Marshal(resp)
-	if err != nil {
-		return `{"v":1,"ok":false,"errors":[{"message":"响应序列化失败","severity":"error","kind":"parse_error"}]}`
-	}
-	return string(b)
+func main() {
+	// 常驻：保持 runtime 存活，使宿主可在 go.run() 后同步调用导出。
+	select {}
 }

@@ -11,7 +11,7 @@ export interface ParseError {
   kind: string
 }
 
-/** 常驻 wasm handler 返回的原始响应 envelope。 */
+/** 常驻 wasm 返回的原始响应 envelope。 */
 export interface GoResponse {
   /** 协议版本（loader/handler 内部 envelope）。 */
   v?: number
@@ -27,10 +27,9 @@ export const PROTOCOL_VERSION = 1
 /** 随包分发的 wasm 二进制绝对路径。 */
 const WASM_BIN = path.join(__dirname, '..', '..', 'dist-wasm', 'uast4go.wasm')
 
-const EXPORT_NAME = '__uastGoParse'
-
 let ready = false
 let initPromise: Promise<void> | null = null
+let instance: WebAssembly.Instance | null = null
 
 /**
  * 准备 wasm_exec.js 依赖的全局变量，顺序与官方 misc/wasm/wasm_exec_node.js
@@ -56,11 +55,38 @@ function prepareGlobals(): void {
   defineIfMissing('crypto', require('crypto'))
 }
 
-async function waitForExport(name: string, timeoutMs = 5000): Promise<void> {
+/**
+ * //go:wasmexport 导出在本实例的线性内存上交换数据，因此直接从
+ * instance.exports 取函数与 mem。
+ */
+interface WasmExports {
+  mem: WebAssembly.Memory
+  uast_alloc(size: number): number
+  uast_parse(ptr: number, len: number): bigint
+}
+
+function exportsOf(inst: WebAssembly.Instance): WasmExports {
+  return inst.exports as unknown as WasmExports
+}
+
+/**
+ * 等待 Go runtime 就绪：导出符号存在后，用一次空分配探针确认 runtime 已初始化
+ * （未初始化时调用导出可能抛错）。
+ */
+async function waitForExports(inst: WebAssembly.Instance, timeoutMs = 5000): Promise<void> {
   const started = Date.now()
-  while (typeof (globalThis as Record<string, unknown>)[name] !== 'function') {
+  for (;;) {
+    const ex = exportsOf(inst)
+    if (typeof ex.uast_alloc === 'function' && typeof ex.uast_parse === 'function' && ex.mem) {
+      try {
+        ex.uast_alloc(0)
+        return
+      } catch {
+        /* runtime 未就绪，继续重试 */
+      }
+    }
     if (Date.now() - started > timeoutMs) {
-      throw new Error(`wasm 导出 ${name} 在 ${timeoutMs}ms 内未出现`)
+      throw new Error(`wasm 导出 uast_alloc/uast_parse 在 ${timeoutMs}ms 内未就绪`)
     }
     await new Promise((resolve) => setImmediate(resolve))
   }
@@ -70,6 +96,7 @@ async function waitForExport(name: string, timeoutMs = 5000): Promise<void> {
 function resetInstance(): void {
   ready = false
   initPromise = null
+  instance = null
 }
 
 /**
@@ -83,8 +110,7 @@ export async function init(): Promise<void> {
     prepareGlobals()
 
     // pkg 兼容：使用静态字符串字面量，pkg 的静态分析才能在构建期发现该资产。
-    // 运行时拼接路径（path.join(...)）对 pkg 静态分析不可见。（真实 pkg 快照
-    // 验证见 P4。）
+    // 运行时拼接路径（path.join(...)）对 pkg 静态分析不可见。
     require('../../dist-wasm/wasm_exec.js')
 
     const GoCtor = (globalThis as unknown as Record<string, unknown>).Go
@@ -105,16 +131,16 @@ export async function init(): Promise<void> {
     // argv[0] 必须是程序名占位，否则参数处理会错位。
     go.argv = ['uast4go.wasm']
     // 最小 env：parser 不读任何环境变量，且透传整个 process.env 可能撑爆 wasm
-    // 固定的 argv/env 缓冲（"total length of command line and environment
-    // variables exceeds limit"）。
+    // 固定的 argv/env 缓冲。
     go.env = { TMPDIR: require('os').tmpdir() }
 
     const bytes = fs.readFileSync(WASM_BIN)
-    const { instance } = await WebAssembly.instantiate(bytes, go.importObject)
-    // 常驻：main 阻塞在 select{}，切勿 await run()（它永不 settle）。
-    void go.run(instance)
+    const wasmInstance = (await WebAssembly.instantiate(bytes, go.importObject)).instance
+    // 常驻：Go main 阻塞在 select{}，切勿 await run()（它永不 settle）。
+    void go.run(wasmInstance)
+    instance = wasmInstance
 
-    await waitForExport(EXPORT_NAME)
+    await waitForExports(wasmInstance)
     ready = true
   })().catch((err) => {
     // init 失败不能污染单例：允许干净重试。
@@ -130,21 +156,38 @@ export function isReady(): boolean {
 }
 
 /**
- * 同步调用常驻 wasm parser。调用天然串行（Go 回调是同步的，JS 无法交错执行）。
- * `ok:false` 不会在此抛出——由 Parser 映射为 JS Error 并保留 `errors` 可见。
- * export 抛错（如 wasm trap）会丢弃实例，后续 init() 可重建。
+ * 同步调用常驻 wasm parser（//go:wasmexport 运输层）：
+ * 1. uast_alloc(len) 分配请求缓冲并取得指针；
+ * 2. 把请求字节写入线性内存 [ptr, ptr+len)；
+ * 3. uast_parse(ptr, len) 返回打包结果 (resultPtr<<32)|resultLen；
+ * 4. 从线性内存读回响应 JSON。
+ *
+ * 调用天然串行（同步导出，JS 无法交错执行）。`ok:false` 不会在此抛出——由
+ * Parser 映射为 JS Error 并保留 `errors` 可见。导出抛错（如 wasm trap）会丢弃
+ * 实例，后续 init() 可重建。
  */
 export function call(request: unknown): GoResponse {
-  if (!ready) {
+  if (!ready || !instance) {
     throw new Error('Parser 未初始化，请先 await parser.init()')
   }
 
+  const ex = exportsOf(instance)
+  const payload = new TextEncoder().encode(
+    JSON.stringify(Object.assign({ v: PROTOCOL_VERSION }, request as Record<string, unknown>))
+  )
+
   let raw: string
   try {
-    const payload = Object.assign({ v: PROTOCOL_VERSION }, request as Record<string, unknown>)
-    raw = (globalThis as unknown as Record<string, (s: string) => string>)[EXPORT_NAME](
-      JSON.stringify(payload)
-    )
+    const ptr = ex.uast_alloc(payload.length)
+    if (payload.length > 0) {
+      // alloc 可能增长过内存，写入前重新取 buffer。
+      new Uint8Array(ex.mem.buffer, ptr, payload.length).set(payload)
+    }
+    const packed = BigInt.asUintN(64, ex.uast_parse(ptr, payload.length))
+    const resultPtr = Number(packed >> 32n)
+    const resultLen = Number(packed & 0xffffffffn)
+    // parse 可能增长过内存，读回前重新取 buffer。
+    raw = new TextDecoder().decode(new Uint8Array(ex.mem.buffer, resultPtr, resultLen))
   } catch (e) {
     resetInstance()
     throw e

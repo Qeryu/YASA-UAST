@@ -10,13 +10,14 @@ const { ROOT } = require('./helpers')
 
 const pkg = require('../package.json')
 
-test('package.json wires build/build:wasm/prepack and stays runtime-dependency free', () => {
+test('package.json wires build/build:wasm/prepare/prepack and stays runtime-dependency free', () => {
   assert.equal(pkg.name, '@ant-yasa/uast-parser-go')
   assert.equal(pkg.main, 'dist/src/index.js')
   assert.equal(pkg.types, 'dist/src/index.d.ts')
   assert.ok(!pkg.dependencies || Object.keys(pkg.dependencies).length === 0, 'zero runtime dependencies')
   assert.match(pkg.scripts.build, /tsc/)
   assert.match(pkg.scripts['build:wasm'], /build-wasm/)
+  assert.match(pkg.scripts.prepare, /build/)
   assert.match(pkg.scripts.prepack, /build/)
   assert.ok(pkg.files.includes('dist/') && pkg.files.includes('dist-wasm/'))
 })
@@ -27,12 +28,16 @@ test('npm pack --dry-run lists dist/ and dist-wasm/ assets', () => {
     execFileSync('npm', ['run', 'build:wasm'], { cwd: ROOT, stdio: 'pipe' })
   }
 
-  const out = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+  const out = execFileSync('npm', ['pack', '--dry-run', '--json'], {
     cwd: ROOT,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  const parsed = JSON.parse(out)
+  // npm pack 会执行 prepare（--ignore-scripts 也拦不住），其构建日志与 JSON 同写
+  // stdout；从第一个 '[' 处开始解析 JSON 部分。
+  const jsonStart = out.indexOf('[')
+  assert.ok(jsonStart >= 0, `no JSON array in npm pack output: ${out.slice(0, 200)}`)
+  const parsed = JSON.parse(out.slice(jsonStart))
   const entry = Array.isArray(parsed) ? parsed[0] : parsed
   const files = entry.files.map((f) => f.path)
 

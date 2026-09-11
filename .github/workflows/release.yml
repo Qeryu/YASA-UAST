@@ -333,7 +333,103 @@ jobs:
 
           echo "✅ Published @ant-yasa/uast-parser-php@$VERSION"
 
-  # 4. 构建 Go 可执行文件（多平台）
+  # 3b. 发布 @ant-yasa/uast-parser-go（tsc + 常驻 wasm 的 npm 包）
+  publish_parser_go:
+    needs: [publish_parser_php, get_version]
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      VERSION: ${{ needs.get_version.outputs.version }}
+      NPM_TAG: ${{ needs.get_version.outputs.npm_tag }}
+    steps:
+      - name: Validate version
+        run: |
+          echo "🎯 VERSION: '$VERSION'"
+          echo "🎯 NPM_TAG: '$NPM_TAG'"
+          if [ -z "$VERSION" ]; then
+            echo "❌ ERROR: VERSION is empty!"
+            exit 1
+          fi
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.20.2
+          registry-url: https://registry.npmjs.org/
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+
+      - name: Upgrade npm
+        run: |
+          npm install -g npm@11.6.4
+          echo "npm after upgrade:"
+          npm -v
+          echo "node after upgrade:"
+          node -v
+
+      - name: Check and Publish
+        working-directory: parser-Go
+        run: |
+          echo "🔍 Publishing @ant-yasa/uast-parser-go"
+          echo "📦 Version: $VERSION"
+          echo "🏷  NPM Tag: $NPM_TAG"
+
+          if npm view @ant-yasa/uast-parser-go@$VERSION version > /dev/null 2>&1; then
+            echo "✅ Version $VERSION already published, skipping."
+            exit 0
+          fi
+
+          echo "🟢 Installing dependencies..."
+          npm install
+
+          echo "🏗️  Building tsc + wasm..."
+          npm run build
+          npm run build:wasm
+
+          # === 校验 tsc 产物与 wasm 资产 ===
+          if [ ! -f dist/src/index.js ]; then
+            echo "❌ dist/src/index.js NOT found!"
+            ls -R dist/ || echo "dist/ is empty or missing"
+            exit 1
+          fi
+          if [ ! -f dist-wasm/uast4go.wasm ] || [ ! -f dist-wasm/wasm_exec.js ]; then
+            echo "❌ dist-wasm assets NOT found!"
+            ls -R dist-wasm/ || echo "dist-wasm/ is empty or missing"
+            exit 1
+          fi
+          echo "✅ dist/src/index.js and dist-wasm/{uast4go.wasm,wasm_exec.js} exist"
+
+          # === dry-run 打包，检查内容（npm pack 会执行 prepare，输出含构建日志） ===
+          echo "📦 Running 'npm pack --dry-run' to verify package contents..."
+          DRY_RUN_OUTPUT=$(npm pack --dry-run 2>&1)
+          echo "$DRY_RUN_OUTPUT"
+
+          if echo "$DRY_RUN_OUTPUT" | grep -q "dist/src/index.js"; then
+            echo "✅ dist/src/index.js is included in the npm package."
+          else
+            echo "❌ dist/src/index.js is NOT included in the npm package!"
+            exit 1
+          fi
+          if echo "$DRY_RUN_OUTPUT" | grep -q "dist-wasm/uast4go.wasm"; then
+            echo "✅ dist-wasm/uast4go.wasm is included in the npm package."
+          else
+            echo "❌ dist-wasm/uast4go.wasm is NOT included in the npm package!"
+            exit 1
+          fi
+
+          # === 设置版本号并与其它包联动 ===
+          echo "🔄 Setting version in package.json..."
+          npm version $VERSION --no-git-tag-version
+          npm publish --tag $NPM_TAG
+
+          echo "✅ Published @ant-yasa/uast-parser-go@$VERSION"
+
+  # 4. 构建 Go 可执行文件（多平台，native fallback）
   build_go:
     needs: publish_parser_js
     runs-on: ubuntu-latest
