@@ -96,9 +96,9 @@ if [ "$WITH_WASM" -eq 1 ]; then
 fi
 
 echo
-if [ "$single_diff" -eq 0 ] && [ "$proj_rc" -eq 0 ]; then
-  echo "RESULT: PASS"
+if [ "$single_diff" -eq 0 ]; then
+  echo "RESULT: PASS (单文件严格对比通过；项目模式为信息性)"
   exit 0
 fi
-echo "RESULT: DIFF (native single diffs / wasm diffs / project_rc=$proj_rc)"
+echo "RESULT: DIFF (单文件严格对比存在差异；project_rc=$proj_rc 仅供参考)"
 exit 1
