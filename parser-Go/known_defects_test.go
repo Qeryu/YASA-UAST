@@ -11,14 +11,14 @@ import (
 	"uast4go/api"
 )
 
-// TestParsePackageRandomSelection documents the known defect from
-// docs/uastgo-wasm-plan.md §5.4 (and TODO §8 O1): ParsePackage picks a package
-// from a Go map iteration, so a directory containing both `p` and `p_test` may
-// randomly drop the main package. Decision for P1/P2a: keep the original
-// behavior, record the defect and skip. Remove the skip once deterministic
-// selection lands; the assertion body is the regression guard.
+// TestParsePackageRandomSelection documents a known defect in the original
+// implementation: ParsePackage picks a package from a Go map iteration, so a
+// directory containing both `p` and `p_test` may randomly drop the main
+// package. Decision for this change: keep the original behavior, record the
+// defect and skip. Remove the skip once deterministic selection lands; the
+// assertion body is the regression guard.
 func TestParsePackageRandomSelection(t *testing.T) {
-	t.Skip("known defect: main.go:27-29 随机选包；见 docs/uastgo-wasm-plan.md §5.4；本次不修")
+	t.Skip("known defect: 原版随机选包（map 迭代顺序），本次不修")
 
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "p.go"), "package p\n\nconst Main = 1\n")
