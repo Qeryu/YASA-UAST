@@ -16,7 +16,7 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-TOTAL=9
+TOTAL=10
 STEP=0
 
 step() { ((STEP++)); echo -e "\n${CYAN}[$STEP/$TOTAL] $1${NC}"; }
@@ -125,6 +125,38 @@ else
         fi
     else
         pass "parser-Go: $GO_PASS package(s) passed"
+    fi
+fi
+
+# best-effort：wasm 构建 + npm 测试（覆盖 wasmexport 运输层与 loader）。
+# 无 go/npm 或 npm install 失败时 skip（不判定失败）；仅测试真正失败时 fail。
+step "parser-Go: npm build:wasm + npm test"
+cd "$ROOT_DIR/parser-Go"
+if ! command -v go &>/dev/null; then
+    skip "parser-Go npm tests (go not installed)"
+elif ! command -v npm &>/dev/null; then
+    skip "parser-Go npm tests (npm not installed)"
+else
+    NPM_READY=1
+    if [ ! -d node_modules ]; then
+        if ! npm install --prefer-offline --no-audit --no-fund >/tmp/uastgo_npm_install.log 2>&1; then
+            NPM_READY=0
+        fi
+    fi
+    if [ "$NPM_READY" -eq 0 ]; then
+        skip "parser-Go npm tests (npm install failed; see /tmp/uastgo_npm_install.log)"
+    else
+        NPM_OUTPUT=$(npm test 2>&1) || true
+        NPM_PASS=$(echo "$NPM_OUTPUT" | grep -oE '# pass [0-9]+' | head -1 | grep -oE '[0-9]+' || echo "0")
+        NPM_FAIL=$(echo "$NPM_OUTPUT" | grep -oE '# fail [0-9]+' | head -1 | grep -oE '[0-9]+' || echo "0")
+        if [ "${NPM_FAIL:-0}" -gt 0 ]; then
+            fail "parser-Go npm tests: $NPM_PASS passed, $NPM_FAIL failed"
+            echo "$NPM_OUTPUT" | grep -E "not ok|# fail" | head -10
+        elif [ "${NPM_PASS:-0}" -eq 0 ]; then
+            skip "parser-Go npm tests (no node --test summary parsed)"
+        else
+            pass "parser-Go npm tests: $NPM_PASS passed"
+        fi
     fi
 fi
 

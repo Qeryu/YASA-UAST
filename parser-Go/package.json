@@ -11,10 +11,10 @@
   "scripts": {
     "build": "tsc",
     "build:wasm": "bash scripts/build-wasm.sh",
-    "prepare": "npm run build && npm run build:wasm",
-    "pretest": "npm run build && npm run build:wasm",
+    "prepare": "node scripts/build-all.js",
+    "pretest": "node scripts/build-all.js --force",
     "test": "node --test tests/*.test.js",
-    "prepack": "npm run build && npm run build:wasm"
+    "prepack": "node scripts/build-all.js --force"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"

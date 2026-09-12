@@ -384,27 +384,11 @@ jobs:
             exit 0
           fi
 
-          echo "🟢 Installing dependencies..."
-          npm install
+          # 只安装依赖，不触发 prepare 构建；构建统一交给 pack/publish 的 prepack（F3）。
+          echo "🟢 Installing dependencies (prepare skipped)..."
+          npm install --ignore-scripts
 
-          echo "🏗️  Building tsc + wasm..."
-          npm run build
-          npm run build:wasm
-
-          # === 校验 tsc 产物与 wasm 资产 ===
-          if [ ! -f dist/src/index.js ]; then
-            echo "❌ dist/src/index.js NOT found!"
-            ls -R dist/ || echo "dist/ is empty or missing"
-            exit 1
-          fi
-          if [ ! -f dist-wasm/uast4go.wasm ] || [ ! -f dist-wasm/wasm_exec.js ]; then
-            echo "❌ dist-wasm assets NOT found!"
-            ls -R dist-wasm/ || echo "dist-wasm/ is empty or missing"
-            exit 1
-          fi
-          echo "✅ dist/src/index.js and dist-wasm/{uast4go.wasm,wasm_exec.js} exist"
-
-          # === dry-run 打包，检查内容（npm pack 会执行 prepare，输出含构建日志） ===
+          # === dry-run 打包：prepack（build-all.js --force）会构建 dist + dist-wasm ===
           echo "📦 Running 'npm pack --dry-run' to verify package contents..."
           DRY_RUN_OUTPUT=$(npm pack --dry-run 2>&1)
           echo "$DRY_RUN_OUTPUT"
@@ -421,6 +405,14 @@ jobs:
             echo "❌ dist-wasm/uast4go.wasm is NOT included in the npm package!"
             exit 1
           fi
+
+          # === 确认 prepack 确实构建了产物 ===
+          if [ ! -f dist/src/index.js ] || [ ! -f dist-wasm/uast4go.wasm ] || [ ! -f dist-wasm/wasm_exec.js ]; then
+            echo "❌ dist/ or dist-wasm/ assets NOT built by prepack!"
+            ls -R dist/ dist-wasm/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "✅ prepack built dist/src/index.js and dist-wasm/{uast4go.wasm,wasm_exec.js}"
 
           # === 设置版本号并与其它包联动 ===
           echo "🔄 Setting version in package.json..."
@@ -638,7 +630,8 @@ jobs:
   # 6. 合并产物并创建 GitHub Release
   create_release:
     # needs: [build_go, build_python_linux, build_python_macos, build_python_windows]
-    needs: [build_go, build_python_linux, build_python_macos]
+    # 所有 npm 发布成功后才创建 Release（发布失败不建 release）。
+    needs: [publish_spec, publish_parser_js, publish_parser_php, publish_parser_go, build_go, build_python_linux, build_python_macos]
     runs-on: ubuntu-latest
     environment: release
     permissions:

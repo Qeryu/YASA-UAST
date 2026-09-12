@@ -33,11 +33,10 @@ test('npm pack --dry-run lists dist/ and dist-wasm/ assets', () => {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  // npm pack 会执行 prepare（--ignore-scripts 也拦不住），其构建日志与 JSON 同写
-  // stdout；从第一个 '[' 处开始解析 JSON 部分。
-  const jsonStart = out.indexOf('[')
-  assert.ok(jsonStart >= 0, `no JSON array in npm pack output: ${out.slice(0, 200)}`)
-  const parsed = JSON.parse(out.slice(jsonStart))
+  // build-all.js 把构建日志写到 stderr，因此 npm pack --json 的 stdout 是干净 JSON。
+  const trimmed = out.trim()
+  assert.ok(trimmed.startsWith('['), `npm pack --json stdout 不是 JSON 数组: ${trimmed.slice(0, 200)}`)
+  const parsed = JSON.parse(trimmed)
   const entry = Array.isArray(parsed) ? parsed[0] : parsed
   const files = entry.files.map((f) => f.path)
 
